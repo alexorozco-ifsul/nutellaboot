@@ -102,6 +102,17 @@ NB3FWEOF
         done
         IFS=$_old_ifs
     fi
+    # O pacote maratona-firewall traz hosts/nutellaboot.naquadah.com.br fixo:
+    # o servidor da organizacao da Maratona. Numa sede que roda o proprio
+    # NutellaBoot isso e saida liberada no ufw e uma entrada em /etc/hosts para
+    # um endereco que ninguem usa — e, quando divide IP com outro nome, entra
+    # na disputa do laco que monta o /etc/hosts. So sai se o servidor DESTA
+    # instalacao for outro, para nao quebrar quem de fato usa o oficial.
+    case "${NB_SERVER:-}" in
+        *naquadah.com.br*) : ;;
+        *) rm -f "${rootmnt?}/usr/share/maratona-firewall/hosts/nutellaboot.naquadah.com.br" ;;
+    esac
+
     [ "$DISABLE_FIREWALL" = t ] &&
         ln -s /dev/null "${rootmnt?}/etc/systemd/system/maratona-firewall.service"
 
