@@ -10,10 +10,11 @@ nb3_post_firewall() {
     # maratona-firewall); quando ela vier sem o padrão defeituoso, isto vira
     # no-op sozinho.
     _fwsh="${rootmnt?}/usr/share/maratona-firewall/maratona-firewall-configuration.sh"
-    if [ -f "$_fwsh" ] && grep -q 'egrep -v' "$_fwsh"; then
-        nb_warn "patching maratona-firewall /etc/hosts filter (old base image)"
+    if [ -f "$_fwsh" ] && ! grep -q 'nb3-hosts-fix-v2' "$_fwsh"; then
+        nb_warn "patching maratona-firewall /etc/hosts filter (base image)"
         cat > "$_fwsh" << 'NB3FWEOF'
 #!/bin/bash
+# nb3-hosts-fix-v2
 
 # Reset no ufw - apaga tudo e volta para o padrao
 ufw -f reset
@@ -51,9 +52,8 @@ for LATAMHOST in /usr/share/maratona-firewall/hosts/* /etc/maratona-firewall/hos
   # into an unanchored egrep ERE, so a file named "maratona" wiped every line
   # containing that word - including allowlist entries written by previous
   # loop iterations. Unescaped dots in $IP had the same problem.
-  awk -v ip="$IP" -v host="$HOSTNAME" '
+  awk -v host="$HOSTNAME" '
     /^[[:space:]]*#/ { print; next }
-    $1 == ip { next }
     { for (i = 2; i <= NF; i++) if ($i == host) next }
     { print }
   ' /etc/hosts > $TMPFILE
