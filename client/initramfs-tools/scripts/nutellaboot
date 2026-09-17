@@ -630,8 +630,8 @@ nb_net_reset() {
 # enquanto o wifi.conf está vazio, porque o desvio é guardado por [ -s ].
 # Visto no lab 219 em 16/09/2026.
 #
-# Cinco segundos é barato: o atalho do wifi existe para evitar os 5 MINUTOS de
-# DHCP cabeado sem cabo, e continua evitando.
+# Quinze segundos é barato: o atalho do wifi existe para evitar os 5 MINUTOS
+# de DHCP cabeado sem cabo, e continua evitando. Cinco não bastava em campo.
 nb_wired_carrier() {
     # 1ª passada: sobe TODAS as cabeadas, para negociarem em paralelo
     for _nbk_d in "$NB_SYS_NET"/*; do
@@ -658,11 +658,28 @@ nb_wired_carrier() {
             [ -z "$_nbk_c" ] && return 0
             [ "$_nbk_c" = 0 ] || return 0
         done
-        [ "$_nbk_t" -ge "${NB_CARRIER_WAIT:-5}" ] && break
+        [ "$_nbk_t" -ge "${NB_CARRIER_WAIT:-15}" ] && break
         sleep 1
         _nbk_t=$((_nbk_t + 1))
     done
+    nb_log "no wired carrier after ${_nbk_t}s ($(nb_wired_report))"
     return 1
+}
+
+# Uma linha dizendo o que as cabeadas responderam. O bug do carrier passou
+# despercebido porque NADA no boot dizia qual caminho foi escolhido nem por
+# que. Sem isto, o sintoma na sala e um download que nao anda.
+nb_wired_report() {
+    _nbr_o=""
+    for _nbr_d in "$NB_SYS_NET"/*; do
+        _nbr_i=${_nbr_d##*/}
+        [ "$_nbr_i" = lo ] && continue
+        if [ -e "$_nbr_d/wireless" ] || [ -e "$_nbr_d/phy80211" ]; then
+            continue
+        fi
+        _nbr_o="$_nbr_o $_nbr_i=$(cat "$_nbr_d/carrier" 2> /dev/null || echo unreadable)"
+    done
+    printf '%s' "${_nbr_o:- no wired interface}"
 }
 
 configure_localnetwork() {
@@ -676,6 +693,7 @@ configure_localnetwork() {
         if [ -s "$NB_RUN/wifi.conf" ] && ! nb_wired_carrier; then
             nb_warn "no cable detected; trying wifi first"
         else
+            nb_log "using the wired path ($(nb_wired_report))"
             log_begin_msg "Configuring the network (attempt $_nbn_try)"
             nb_net_reset
             configure_networking
