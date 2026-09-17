@@ -621,7 +621,19 @@ nb_net_reset() {
 
 # Existe cabo? Só quem responde 0 explicitamente é considerado sem link: NIC
 # que não reporta carrier fica no caminho cabeado, que é o que boota as salas.
+#
+# A ESPERA NÃO É OPCIONAL. A primeira versão subia o link e lia o carrier no
+# MESMO instante; a autonegociação gigabit leva de 1 a 3 s, então a placa
+# respondia 0 e a função concluía "sem cabo" — numa máquina com cabo perfeito.
+# Com wifi.conf preenchido isso desviava a sala inteira para o rádio, de onde
+# os seeders da sala são inalcançáveis e o aria2 morre em timeout. Latente
+# enquanto o wifi.conf está vazio, porque o desvio é guardado por [ -s ].
+# Visto no lab 219 em 16/09/2026.
+#
+# Cinco segundos é barato: o atalho do wifi existe para evitar os 5 MINUTOS de
+# DHCP cabeado sem cabo, e continua evitando.
 nb_wired_carrier() {
+    # 1ª passada: sobe TODAS as cabeadas, para negociarem em paralelo
     for _nbk_d in "$NB_SYS_NET"/*; do
         _nbk_i=${_nbk_d##*/}
         [ "$_nbk_i" = lo ] && continue
@@ -629,8 +641,26 @@ nb_wired_carrier() {
             continue
         fi
         ip link set "$_nbk_i" up 2> /dev/null
-        _nbk_c=$(cat "$_nbk_d/carrier" 2> /dev/null)
-        [ "$_nbk_c" = 0 ] || return 0
+    done
+
+    # 2ª passada: espera o carrier aparecer em alguma delas
+    _nbk_t=0
+    while :; do
+        for _nbk_d in "$NB_SYS_NET"/*; do
+            _nbk_i=${_nbk_d##*/}
+            [ "$_nbk_i" = lo ] && continue
+            if [ -e "$_nbk_d/wireless" ] || [ -e "$_nbk_d/phy80211" ]; then
+                continue
+            fi
+            _nbk_c=$(cat "$_nbk_d/carrier" 2> /dev/null)
+            # vazio = a NIC não sabe informar; mantém o caminho cabeado, como
+            # antes. 1 = link de verdade. 0 = ainda negociando, espera mais.
+            [ -z "$_nbk_c" ] && return 0
+            [ "$_nbk_c" = 0 ] || return 0
+        done
+        [ "$_nbk_t" -ge "${NB_CARRIER_WAIT:-5}" ] && break
+        sleep 1
+        _nbk_t=$((_nbk_t + 1))
     done
     return 1
 }
