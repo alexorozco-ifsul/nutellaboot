@@ -431,6 +431,32 @@ def test_com_cabo_o_caminho_cabeado_continua_primeiro(sh):
     assert sh.chamadas().index("dhcpcd") < sh.chamadas().index("wpa_supplicant")
 
 
+def test_carrier_que_chega_depois_da_autonegociacao_e_cabo(sh):
+    """A autonegociação gigabit leva de 1 a 3 s: ler o carrier no mesmo instante
+    em que o link sobe dava 0 numa máquina com cabo perfeito, e com wifi.conf
+    preenchido a sala inteira ia para o rádio (lab 219, 16/09/2026)."""
+    out = sh(
+        '( sleep 1; echo 1 > "$NB_SYS_NET/eth0/carrier" ) & '
+        "if nb_wired_carrier; then echo CABO; else echo SEM-CABO; fi; wait",
+        NB_CARRIER_WAIT="5",
+    )
+    assert "CABO" in out and "SEM-CABO" not in out
+
+
+def test_so_a_primeira_rodada_espera_a_autonegociacao(sh):
+    """Sem cabo, esperar a cada rodada somaria 15 s x 10 antes de cada tentativa
+    de wifi. A segunda chamada lê o estado na hora."""
+    import time
+
+    inicio = time.monotonic()
+    out = sh(
+        "nb_wired_carrier; nb_wired_carrier; nb_wired_carrier; echo FIM",
+        NB_CARRIER_WAIT="2",
+    )
+    assert "FIM" in out
+    assert time.monotonic() - inicio < 5, "esperou de novo depois da primeira rodada"
+
+
 def test_placa_que_nao_reporta_carrier_fica_no_caminho_cabeado(sh):
     """Só quem responde 0 explicitamente é considerado sem link."""
     (sh.sysnet / "eth0" / "carrier").unlink()

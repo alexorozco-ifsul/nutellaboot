@@ -701,7 +701,19 @@ nb_net_reset() {
 
 # Existe cabo? Só quem responde 0 explicitamente é considerado sem link: NIC
 # que não reporta carrier fica no caminho cabeado, que é o que boota as salas.
+#
+# A ESPERA NÃO É OPCIONAL. A primeira versão subia o link e lia o carrier no
+# MESMO instante; a autonegociação gigabit leva de 1 a 3 s, então a placa
+# respondia 0 e a função concluía "sem cabo" — numa máquina com cabo perfeito.
+# Com wifi.conf preenchido isso desviava a sala inteira para o rádio, de onde
+# os seeders da sala são inalcançáveis e o aria2 morre em timeout. Latente
+# enquanto o wifi.conf está vazio, porque o desvio é guardado por [ -s ].
+# Visto no lab 219 em 16/09/2026.
+#
+# Quinze segundos é barato: o atalho do wifi existe para evitar os 5 MINUTOS
+# de DHCP cabeado sem cabo, e continua evitando. Cinco não bastava em campo.
 nb_wired_carrier() {
+    # 1ª passada: sobe TODAS as cabeadas, para negociarem em paralelo
     for _nbk_d in "$NB_SYS_NET"/*; do
         _nbk_i=${_nbk_d##*/}
         [ "$_nbk_i" = lo ] && continue
@@ -709,10 +721,52 @@ nb_wired_carrier() {
             continue
         fi
         ip link set "$_nbk_i" up 2> /dev/null
-        _nbk_c=$(cat "$_nbk_d/carrier" 2> /dev/null)
-        [ "$_nbk_c" = 0 ] || return 0
     done
+
+    # 2ª passada: espera o carrier aparecer em alguma delas. A autonegociação
+    # acontece UMA vez: só a primeira chamada do boot espera. Nas rodadas
+    # seguintes de configure_localnetwork o link já está de pé há tempo, e
+    # esperar de novo só atrasaria o wifi (15 s por rodada, 10 rodadas). Um
+    # cabo ligado depois negocia sozinho enquanto o rádio é tentado.
+    _nbk_max=${NB_CARRIER_WAIT:-15}
+    [ -n "${nb_carrier_waited:-}" ] && _nbk_max=0
+    nb_carrier_waited=1
+    _nbk_t=0
+    while :; do
+        for _nbk_d in "$NB_SYS_NET"/*; do
+            _nbk_i=${_nbk_d##*/}
+            [ "$_nbk_i" = lo ] && continue
+            if [ -e "$_nbk_d/wireless" ] || [ -e "$_nbk_d/phy80211" ]; then
+                continue
+            fi
+            _nbk_c=$(cat "$_nbk_d/carrier" 2> /dev/null)
+            # vazio = a NIC não sabe informar; mantém o caminho cabeado, como
+            # antes. 1 = link de verdade. 0 = ainda negociando, espera mais.
+            [ -z "$_nbk_c" ] && return 0
+            [ "$_nbk_c" = 0 ] || return 0
+        done
+        [ "$_nbk_t" -ge "$_nbk_max" ] && break
+        sleep 1
+        _nbk_t=$((_nbk_t + 1))
+    done
+    nb_log "no wired carrier after ${_nbk_t}s ($(nb_wired_report))"
     return 1
+}
+
+# Uma linha dizendo o que as cabeadas responderam. O bug do carrier passou
+# despercebido porque NADA no boot dizia qual caminho foi escolhido nem por
+# que. Sem isto, o sintoma na sala e um download que nao anda.
+nb_wired_report() {
+    _nbr_o=""
+    for _nbr_d in "$NB_SYS_NET"/*; do
+        _nbr_i=${_nbr_d##*/}
+        [ "$_nbr_i" = lo ] && continue
+        if [ -e "$_nbr_d/wireless" ] || [ -e "$_nbr_d/phy80211" ]; then
+            continue
+        fi
+        _nbr_o="$_nbr_o $_nbr_i=$(cat "$_nbr_d/carrier" 2> /dev/null || echo unreadable)"
+    done
+    printf '%s' "${_nbr_o:- no wired interface}"
 }
 
 configure_localnetwork() {
@@ -726,6 +780,7 @@ configure_localnetwork() {
         if [ -s "$NB_RUN/wifi.conf" ] && ! nb_wired_carrier; then
             nb_warn "no cable detected; trying wifi first"
         else
+            nb_log "using the wired path ($(nb_wired_report))"
             log_begin_msg "Configuring the network (attempt $_nbn_try)"
             nb_net_reset
             configure_networking
