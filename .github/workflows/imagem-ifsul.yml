@@ -1,0 +1,40 @@
+# Imagem do servidor para o cluster do IFSul Sapucaia (ver ifsul/README.md).
+# Cada push na branch "ifsul" publica ghcr.io/<dono>/nutellaboot:ifsul-<commit>;
+# o job do Nomad fixa essa tag (nunca "latest").
+name: imagem-ifsul
+
+on:
+  push:
+    branches: [ifsul]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  imagem:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: tag
+        run: echo "curta=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ifsul/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/nutellaboot:ifsul-${{ steps.tag.outputs.curta }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}

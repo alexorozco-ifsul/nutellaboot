@@ -1,0 +1,10 @@
+.git
+.github
+.venv
+data/*
+client/build*
+tests
+**/__pycache__
+*.img
+*.raw
+*.squash*
