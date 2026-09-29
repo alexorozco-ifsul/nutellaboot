@@ -187,6 +187,12 @@ def test_entrada_maratona_e_pulada(imagem, raiz):
 # --- a sobrescrita do filtro de /etc/hosts da base publicada
 
 
+DESCARTA_PELO_IP = """#!/bin/bash
+awk -v ip="$IP" -v host="$HOSTNAME" '
+    $1 == ip { next }
+' /etc/hosts > $TMPFILE
+"""
+
 DEFEITUOSO = """#!/bin/bash
 IP="$(head -n1 $LATAMHOST)"
 egrep -v "($IP|$HOSTNAME)" /etc/hosts > $TMPFILE
@@ -205,11 +211,43 @@ def test_a_base_defeituosa_e_corrigida(imagem, raiz):
     assert r.returncode == 0, r.stderr
     texto = alvo.read_text()
     assert "egrep -v" not in texto
-    assert 'awk -v ip="$IP" -v host="$HOSTNAME"' in texto
+    assert 'awk -v host="$HOSTNAME"' in texto
+    assert "$1 == ip { next }" not in texto
     assert alvo.stat().st_mode & 0o111, "o serviço executa o script direto"
     ok = subprocess.run(["bash", "-n", str(alvo)], capture_output=True, text=True)
     assert ok.returncode == 0, ok.stderr
     assert "patching maratona-firewall" in r.stdout + r.stderr
+
+
+def test_a_base_que_descarta_pelo_ip_e_corrigida(imagem, raiz):
+    """A primeira correção comparava campos, mas ainda descartava toda linha
+    com o mesmo IP: dois nomes atrás do mesmo proxy se apagavam e só o último
+    da ordem alfabética ficava no /etc/hosts. Essa base também é trocada."""
+    alvo = raiz / "usr/share/maratona-firewall/maratona-firewall-configuration.sh"
+    alvo.write_text(DESCARTA_PELO_IP)
+
+    r = roda_consumidor(imagem, "nb3_post_firewall", raiz)
+    assert r.returncode == 0, r.stderr
+    texto = alvo.read_text()
+    assert "$1 == ip { next }" not in texto
+    assert 'awk -v host="$HOSTNAME"' in texto
+    assert "patching maratona-firewall" in r.stdout + r.stderr
+
+
+def test_dois_nomes_no_mesmo_ip_ficam_no_hosts(tmp_path):
+    """O filtro corrigido, rodado de verdade: o segundo nome não apaga o primeiro."""
+    script = (REPO / "client/stuff/60-postmount.d/30-firewall.sh").read_text()
+    filtro = script[script.index("awk -v host="):script.index("' /etc/hosts")] + "'"
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1\tlocalhost\n")
+    for nome in ("moj.exemplo", "nutellaboot.exemplo"):
+        velho = hosts.read_text()
+        r = subprocess.run(["bash", "-c", filtro.replace('"$HOSTNAME"', '"' + nome + '"') + ' "$1"', "_", str(hosts)],
+                           capture_output=True, text=True, check=True)
+        hosts.write_text(r.stdout + "200.19.248.54\t" + nome + "\n")
+    linhas = hosts.read_text().splitlines()
+    assert "200.19.248.54\tmoj.exemplo" in linhas
+    assert "200.19.248.54\tnutellaboot.exemplo" in linhas
 
 
 def test_a_base_ja_corrigida_fica_intacta(imagem, raiz):

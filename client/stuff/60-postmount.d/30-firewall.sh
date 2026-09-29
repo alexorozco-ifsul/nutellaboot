@@ -5,12 +5,14 @@ nb3_post_firewall() {
     # A base publicada filtra o /etc/hosts com egrep por SUBSTRING sem âncora:
     # o hosts/maratona (escrito no fim desta função) apagava qualquer linha
     # contendo "maratona" — inclusive entradas legítimas do whitelist gravadas
-    # pelas iterações anteriores. Enquanto a base não for reconstruída com o
-    # pacote corrigido, o script entra aqui por inteiro (idêntico ao commit do
-    # maratona-firewall); quando ela vier sem o padrão defeituoso, isto vira
-    # no-op sozinho.
+    # pelas iterações anteriores. A primeira correção (o awk por campo) ainda
+    # descartava toda linha com o MESMO IP: dois nomes que dividem um endereço
+    # (ex.: moj e nutellaboot atrás do mesmo proxy) se apagavam, e só o último
+    # da ordem alfabética sobrevivia. Enquanto a base não for reconstruída com o
+    # pacote corrigido, o script entra aqui por inteiro; quando ela vier sem
+    # nenhum dos dois padrões defeituosos, isto vira no-op sozinho.
     _fwsh="${rootmnt?}/usr/share/maratona-firewall/maratona-firewall-configuration.sh"
-    if [ -f "$_fwsh" ] && grep -q 'egrep -v' "$_fwsh"; then
+    if [ -f "$_fwsh" ] && grep -qF -e 'egrep -v' -e '$1 == ip { next }' "$_fwsh"; then
         nb_warn "patching maratona-firewall /etc/hosts filter (old base image)"
         cat > "$_fwsh" << 'NB3FWEOF'
 #!/bin/bash
@@ -50,10 +52,10 @@ for LATAMHOST in /usr/share/maratona-firewall/hosts/* /etc/maratona-firewall/hos
   # Compare whole fields, never substrings: the hostname used to be dropped
   # into an unanchored egrep ERE, so a file named "maratona" wiped every line
   # containing that word - including allowlist entries written by previous
-  # loop iterations. Unescaped dots in $IP had the same problem.
-  awk -v ip="$IP" -v host="$HOSTNAME" '
+  # loop iterations. Drop only this HOSTNAME's old line, never by IP: two
+  # names can share an address (e.g. two services behind the same proxy).
+  awk -v host="$HOSTNAME" '
     /^[[:space:]]*#/ { print; next }
-    $1 == ip { next }
     { for (i = 2; i <= NF; i++) if ($i == host) next }
     { print }
   ' /etc/hosts > $TMPFILE
