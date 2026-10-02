@@ -42,10 +42,13 @@ export function editorDePadrao(f, aoMudar) {
     return editorDeLista(f, aoMudar);
   }
   const i = el("input", { type: f.type === "int" ? "number" : "text", class: "mono" });
-  // lista livre (sem opções) vira texto separado por vírgula ou espaço
-  i.value = Array.isArray(f.default) ? f.default.join(", ") : (f.default ?? "");
+  // Lista livre (sem opções) vira texto partido SÓ no separador do campo, como
+  // o servidor faz. Partir também no espaço quebrava o par "NOME IP" do
+  // FIREWALL_ALLOWLIST em dois itens, e o servidor recusava o nome sozinho.
+  const sep = f.sep || ",";
+  i.value = Array.isArray(f.default) ? f.default.join(sep + " ") : (f.default ?? "");
   i.oninput = () => {
-    if (f.type === "list") aoMudar(i.value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean));
+    if (f.type === "list") aoMudar(i.value.split(sep).map((s) => s.trim()).filter(Boolean));
     else if (f.type === "int") aoMudar(i.value === "" ? null : Number(i.value));
     else aoMudar(i.value);
   };
