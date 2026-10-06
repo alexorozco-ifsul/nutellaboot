@@ -193,6 +193,145 @@ def test_roster_e_vinculo(live):
     roda(live, "images", "delete", "cliroster")
 
 
+def _maquina(live, image, chave, mac):
+    r = httpx.post(
+        f"{live['base']}/api/v1/site-images/{image}/machines/{mac}/status",
+        headers={"X-NB-Machine-Key": chave},
+        json={"sysresources": {"mem_pct": 10}},
+        timeout=5,
+    )
+    assert r.status_code == 200, r.text
+
+
+def _pendentes(live, image):
+    r = httpx.get(
+        f"{live['base']}/api/v1/site-images/{image}/machines",
+        headers={"Authorization": f"Bearer {live['admin']}"},
+        timeout=5,
+    )
+    return {m["mac"]: m["pending"] for m in r.json()["machines"]}
+
+
+def test_command_atinge_so_as_maquinas_pedidas(live):
+    """O CLI mandava as máquinas em `macs`, campo que o servidor nunca leu:
+    sem `target` o padrão é a sala inteira, e `command <sede> mlpoweroff <mac>`
+    desligava TODAS. O teste confere o efeito, não o corpo: é na fila de cada
+    máquina que o erro aparece."""
+    roda(live, "images", "create", "clicmd", "--model", "t")
+    cred = json.loads(roda(live, "--json", "images", "credentials", "clicmd").stdout)
+    alvo, vizinha = "52-54-00-00-00-01", "52-54-00-00-00-02"
+    for mac in (alvo, vizinha):
+        _maquina(live, "clicmd", cred["machine_key"], mac)
+
+    r = roda(live, "command", "clicmd", "mlreboot", alvo)
+    assert r.returncode == 0, r.stderr
+    assert _pendentes(live, "clicmd") == {alvo: 1, vizinha: 0}
+
+    # a sala inteira só por extenso
+    r = roda(live, "command", "clicmd", "mlreboot")
+    assert r.returncode != 0
+    assert "--all" in r.stderr
+    assert _pendentes(live, "clicmd") == {alvo: 1, vizinha: 0}
+
+    assert roda(live, "command", "clicmd", "mlreboot", "--all").returncode == 0
+    assert _pendentes(live, "clicmd") == {alvo: 2, vizinha: 1}
+    roda(live, "images", "delete", "clicmd")
+
+
+def test_logo_sobe_de_verdade(live, tmp_path):
+    """Mandava corpo cru a uma rota de `UploadFile`: 422, sempre."""
+    roda(live, "images", "create", "clilogo", "--model", "t")
+    png = tmp_path / "ufu.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+    r = roda(live, "--json", "logo", "clilogo", "ufu", str(png))
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["format"] == "png"
+
+    jpg = tmp_path / "ufu.jpg"
+    jpg.write_bytes(b"\xff\xd8\xff")
+    assert roda(live, "logo", "clilogo", "ufu", str(jpg)).returncode != 0
+    roda(live, "images", "delete", "clilogo")
+
+
+def test_o_caminho_do_moj_pelas_rotas_novas(live):
+    """Chave de serviço se enxerga, acrescenta um time, vincula criando o que
+    falta, vincula em lote, segue um comando e instala o próprio webhook."""
+    roda(live, "images", "create", "clinovo", "--model", "t")
+    cred = json.loads(roda(live, "--json", "images", "credentials", "clinovo").stdout)
+    r = roda(live, "--json", "service-key", "create", "moj-cli",
+             "--scope", "machines:read", "--scope", "roster:write", "--scope", "bindings:write",
+             "--scope", "commands:write", "--scope", "webhooks:write", "--image", "clinovo")
+    assert r.returncode == 0, r.stderr
+    moj = json.loads(r.stdout)["key"]
+
+    eu = json.loads(roda(live, "--json", "whoami", key=moj).stdout)
+    assert eu["kind"] == "service" and eu["images"] == ["clinovo"]
+
+    m1, m2 = "52-54-00-00-aa-01", "52-54-00-00-aa-02"
+    for mac in (m1, m2):
+        _maquina(live, "clinovo", cred["machine_key"], mac)
+
+    assert roda(live, "roster", "add", "clinovo", '{"user_id":"t1","name":"Um"}', key=moj).returncode == 0
+    r = roda(live, "--json", "bind", "clinovo", m1, "t2", "--criar", "--name", "Dois", key=moj)
+    assert r.returncode == 0 and json.loads(r.stdout)["roster_entry_created"] is True, r.stderr
+    lote = json.dumps([{"mac": m2, "user_id": "t1"}, {"mac": "zz", "user_id": "t1"}])
+    d = json.loads(roda(live, "--json", "bind-lote", "clinovo", "-", key=moj, entrada=lote).stdout)
+    assert (d["bound"], d["failed"]) == (1, 1)
+    assert roda(live, "roster", "remove", "clinovo", "t2", key=moj).returncode == 0
+
+    cid = json.loads(roda(live, "--json", "command", "clinovo", "mlreboot", m1, key=moj).stdout)["command_id"]
+    estado = json.loads(roda(live, "--json", "command-status", "clinovo", cid, key=moj).stdout)
+    assert estado["summary"] == {"acked": 0, "pending": 1, "expired": 0}
+
+    # com a chave de admin o destino é livre; a de serviço só aponta para https público
+    r = roda(live, "--json", "webhooks", "add", "clinovo", "--url", "http://127.0.0.1:9/h", "--event", "alert.raised")
+    assert r.returncode == 0, r.stderr
+    wid = json.loads(r.stdout)["id"]
+    r = roda(live, "webhooks", "add", "clinovo", "--url", "http://127.0.0.1:9/h",
+             "--secret", "s" * 16, key=moj)
+    assert r.returncode != 0 and "webhook_url_forbidden" in r.stderr
+    assert roda(live, "webhooks", "update", "clinovo", "--id", wid, "--secret", "novo-segredo").returncode == 0
+    assert json.loads(roda(live, "--json", "webhooks", "test", "clinovo", "--id", wid).stdout)["ok"] is False
+    assert roda(live, "webhooks", "delete", "clinovo", "--id", wid).returncode == 0
+    assert json.loads(roda(live, "--json", "webhooks", "list", "clinovo").stdout)["webhooks"] == []
+    roda(live, "service-key", "delete", "moj-cli")
+    roda(live, "images", "delete", "clinovo")
+
+
+def test_gestao_de_credenciais_pelo_cli(live):
+    """Chaves de admin e de serviço, convite revogado sem destruir, a visão da
+    frota e a auditoria: o que a tela do admin faz, por linha de comando."""
+    nova = json.loads(roda(live, "--json", "admin-key", "create", "cli-camila").stdout)
+    assert nova["key"].startswith("nb3a_")
+    ids = [k["id"] for k in json.loads(roda(live, "--json", "admin-key", "list", key=nova["key"]).stdout)["keys"]]
+    assert "cli-camila" in ids
+    assert roda(live, "admin-key", "revoke", "cli-camila").returncode == 0
+    assert roda(live, "whoami", key=nova["key"]).returncode != 0
+
+    r = roda(live, "--json", "service-key", "create", "cli-telao", "--scope", "labs:read", "--follow", "admin")
+    assert r.returncode == 0, r.stderr
+    antiga = json.loads(r.stdout)["key"]
+    rodada = json.loads(roda(live, "--json", "service-key", "rotate", "cli-telao").stdout)
+    assert rodada["key"] != antiga and rodada["follow"] == "admin"
+    assert roda(live, "service-key", "set", "cli-telao", "--follow", "none").returncode == 0
+    assert roda(live, "service-key", "create", "cli-telao", "--scope", "labs:read").returncode != 0, "409"
+    roda(live, "service-key", "delete", "cli-telao")
+
+    code = json.loads(roda(live, "--json", "invite", "create", '{"count":1,"label":"CLI"}').stdout)["invites"][0]["code"]
+    assert roda(live, "invite", "revoke", code).returncode == 0
+    assert roda(live, "whoami", key=code).returncode != 0
+    assert roda(live, "invite", "restore", code).returncode == 0
+    assert roda(live, "whoami", key=code).returncode == 0
+    assert roda(live, "invite", "delete", code).returncode == 0
+
+    assert json.loads(roda(live, "--json", "view", "set", "--mode", "all").stdout)["view"]["mode"] == "all"
+    assert json.loads(roda(live, "--json", "view", "get").stdout)["view"]["mode"] == "all"
+    roda(live, "view", "set", "--mode", "mine")
+
+    atos = [e["action"] for e in json.loads(roda(live, "--json", "audit", "--limit", "50").stdout)["entries"]]
+    assert {"admin_key.created", "admin_key.revoked", "service_key.rotated", "invite.changed"} <= set(atos)
+
+
 def test_erro_do_servidor_sai_diferente_de_zero_e_diz_o_motivo(live):
     """A invariante 15, do lado do cliente."""
     r = roda(live, "images", "get", "naoexiste")

@@ -30,7 +30,8 @@ para quem vai mexer no código do cliente.
    │                                                            │
    │  1. lê nutellaboot.conf e wifi.conf da partição NB3CFG,    │
    │     copia para a memória e desmonta: "PODE RETIRAR O       │
-   │     PENDRIVE AGORA"                                        │
+   │     PENDRIVE AGORA" — ou, no boot pela rede, usa o conf    │
+   │     que o carregador entregou dentro do initrd             │
    │  2. sobe a rede: cabeada primeiro, wifi se preciso —       │
    │     ESPERANDO a associação de verdade                      │
    │  3. acerta o relógio (/boot/v3/time)                       │
@@ -61,15 +62,25 @@ para quem vai mexer no código do cliente.
    └─────────────┘
 ```
 
+No boot pela rede, as duas primeiras caixas viram o servidor PXE da sede e o
+iPXE, que carrega o mesmo kernel e o mesmo initrd e põe o `nutellaboot.conf`
+dentro deste — ver [Boot pela rede](#boot-pela-rede-pxe-sem-pendrive).
+
 ## Configuração: quem manda em quem
 
 A ordem de precedência é sempre a mesma:
 
 | Prioridade | Origem | Como se escreve |
 |---|---|---|
-| 1 (maior) | Linha de comando do kernel | `IMAGEROOT=26brbr` no `grub.cfg` |
-| 2 | `nutellaboot.conf` do pendrive | `IMAGEROOT=26brbr` |
+| 1 (maior) | Linha de comando do kernel | `IMAGEROOT=26brbr NB_SERVER=https://…` no `grub.cfg` |
+| 2 | `nutellaboot.conf` do pendrive — ou o que o carregador de rede entregou no initrd | `IMAGEROOT=26brbr` |
 | 3 (menor) | Padrão embutido no initrd | `/etc/nutellaboot.defaults` |
+
+A imagem pré-configurada leva `IMAGEROOT` **e** `NB_SERVER` na linha de
+comando do GRUB: o GRUB lê a FAT sozinho, então os dois sobrevivem a uma
+partição que o Linux não conseguiu ler. A chave de boot **nunca** vai para a
+cmdline (ficaria legível em `/proc/cmdline` na máquina de prova) — ela só
+existe no `nutellaboot.conf`, e por isso a partição não lida é fatal (abaixo).
 
 O arquivo `nutellaboot.conf` aceita:
 
@@ -82,7 +93,7 @@ IMAGEROOT=26brbr
 NB_BOOT_KEY=nb3b_...
 
 # Servidor do NutellaBoot (opcional; use para apontar a um servidor de teste).
-#NB_SERVER=https://nutellaboot.naquadah.com.br
+#NB_SERVER=https://nutellaboot.mdp.naquadah.com.br
 
 # Fixa nomes no /etc/hosts do initrd: "nome ip", uma linha por entrada.
 #NB_HOSTS=nutellaboot.charge.naquadah.com.br 10.0.2.2
@@ -95,6 +106,32 @@ initrd desmonta a partição e mostra na tela, em três idiomas, que **o pendriv
 já pode ser retirado**. Nada mais é lido dele durante o resto do boot. Numa
 sala com 60 máquinas, isso libera o pendrive para a próxima máquina em
 segundos, em vez de ficar preso até o sistema subir.
+
+### Quando a partição não aparece
+
+Caso de campo: um disco SATA interno morrendo passou 33 s em `hard resetting
+link`. O `blkid -L NB3CFG` varre todo bloco da máquina e ficou preso nele; as
+5 tentativas de 2 s acabaram, a partição do pendrive não foi lida, e o boot
+seguiu — com a sede vinda da cmdline do GRUB, o servidor vindo do padrão
+embutido (que ainda era o host do NutellaBoot 2) e a chave de boot vazia. Dez
+tentativas de rede depois, a tela `NO NETWORK` mandava a pessoa procurar cabo
+e switch. Nada disso tinha a ver com rede.
+
+Hoje a busca tenta primeiro `/dev/disk/by-label/NB3CFG`, o link que o udev
+cria a partir do evento do **próprio** pendrive (sem ler nenhum outro disco;
+o `60-persistent-storage.rules` e o `blkid` builtin do udev estão no initrd e
+o `nb3-build-initrd` confere os dois), e só cai no `blkid -L` como reserva.
+São 20 tentativas de 2 s (`NB_CFG_TRIES`/`NB_CFG_WAIT`), com `udevadm settle`
+curto antes de cada uma. A mensagem distingue "a partição não apareceu em
+40 s" de "achei `/dev/sdX` e não montei" de "montei e não há
+`nutellaboot.conf`".
+
+E sem `nutellaboot.conf` na RAM — ou com ele sem `NB_BOOT_KEY` — o boot **para
+ali**, na tela `NO CONF`, dizendo a causa e o que fazer (recolocar o pendrive,
+conferir se foi gravado com a imagem da sede, trocar o disco que está morrendo),
+em vez de degradar para um servidor de outra geração e uma tela enganosa. O
+mesmo par by-label/blkid vale para o `25-usbupdate.sh`, que reescreve o
+pendrive e não pode escrever no disco errado.
 
 ### O pendrive se atualiza sozinho
 
@@ -117,6 +154,7 @@ local impede o reinício em laço. Falha de rede não conta como tentativa — n
 foi tocado, e o boot segue com o initrd velho.
 
 Para desligar num dia de aperto: `nousbupdate=y` na linha de comando do kernel.
+No boot pela rede não há o que regravar: a máquina só avisa (abaixo).
 
 > Consequência de reconstruir o initrd: **todos os pendrives em campo vão se
 > atualizar no próximo boot**. Cada máquina baixa ~200 MB a mais uma vez e
@@ -138,6 +176,70 @@ resolve o nome sem mexer em DNS **e sem abrir mão da validação do
 certificado**, porque o nome continua sendo o mesmo — muda só o endereço. É o
 que permite testar em máquina virtual (onde o hospedeiro é sempre `10.0.2.2`) e
 apontar para um espelho local durante a prova.
+
+## Boot pela rede (PXE), sem pendrive
+
+Sala que já tem DHCP + iPXE (como muitas faziam no NutellaBoot 2) boota o mesmo
+kernel e o mesmo initrd pela rede. O que o pendrive fazia — dizer a sede, a
+chave de boot e o servidor — o carregador faz entregando o `nutellaboot.conf`
+como um arquivo a mais **dentro do initrd**, em `/nutellaboot.conf`:
+
+```
+#!ipxe
+dhcp
+kernel vmlinuz boot=nutellaboot noresume pcie_aspm=off net.ifnames=0 persistenthome=y
+initrd initrd.img
+initrd nutellaboot.conf /nutellaboot.conf
+boot
+```
+
+O segundo argumento do `initrd` é o que faz o iPXE embrulhar o arquivo num cpio
+com esse nome. Sem ele, o kernel recebe texto onde espera um cpio, e o arquivo
+não aparece. Vale em BIOS e em UEFI: em UEFI o iPXE entrega os initrds pelo
+LoadFile2, e o kernel de hoje dispensa `initrd=` na linha de comando. Os dois
+caminhos foram bootados em qemu, com a ROM iPXE do qemu e com o `snponly.efi`
+oficial encadeado pelo PXE do OVMF.
+
+Outro carregador serve se souber carregar dois initrds. O conf vira cpio com
+
+```
+echo nutellaboot.conf | cpio -o -H newc > nutellaboot.cpio
+```
+
+e entra como segundo initrd (no PXELINUX, `initrd=initrd.img,nutellaboot.cpio`).
+
+Com o arquivo lá:
+
+- o initrd **não procura a partição NB3CFG**. Eram 40 s por máquina e, no fim,
+  a tela `NO CONF` — o que a primeira sede a tentar o iPXE encontrou;
+- a precedência não muda: `IMAGEROOT` e `NB_SERVER` na linha do kernel vencem o
+  arquivo;
+- arquivo vazio para na tela `NO CONF` com a causa, sem os 40 s;
+- o stuff **não regrava pendrive nenhum** (`25-usbupdate.sh`): kernel e initrd
+  são do servidor de boot da sede, e só quem cuida dele pode trocá-los. Quando
+  a construção do servidor muda, o boot avisa (`the network boot files are out
+  of date`) e segue. Um pendrive NB3CFG espetado por acaso também não é tocado:
+  não foi dele que a máquina bootou.
+
+Quem diz que o boot foi pela rede é a existência do arquivo, nunca a linha de
+comando — um `NB_NETBOOT=1` ali desligaria a regravação do pendrive em
+silêncio, e por isso o initrd zera a variável antes de olhar.
+
+A chave de boot continua fora da linha de comando. No netboot ela mora num
+arquivo do servidor PXE da sede: é a mesma proteção do pendrive largado na
+mesa, e vale a mesma regra — rotacionar a chave exige trocar o arquivo lá.
+
+Os três arquivos:
+
+| Arquivo | De onde vem |
+|---|---|
+| `vmlinuz`, `initrd.img` | os de `client/build/`, os mesmos do pendrive. A sede baixa com a chave de boot: `curl -fO -H "X-NB-Boot-Key: nb3b_…" https://<servidor>/boot/v3/<sede>/usbfile/initrd.img` (idem `vmlinuz`) |
+| `nutellaboot.conf` | o mesmo que o console entrega para o pendrive; o `set` na frente das linhas não atrapalha |
+
+Reconstruir o initrd (`nb3-build-initrd`) deixa as sedes de netboot para trás
+até elas copiarem os arquivos novos. Nada quebra — o stuff aceita initrd
+antigo —, mas uma troca de **kernel** na camada base exige o `vmlinuz` novo lá
+também: os módulos do sistema montado são os do kernel da base.
 
 ## Wifi
 
@@ -214,6 +316,14 @@ minutos antes de o `wpa_supplicant` sequer subir, e foi o que uma sala mediu no
 console. Se nenhuma interface cabeada reporta carrier e o `wifi.conf` tem
 redes, o wifi é tentado antes. Placa que não reporta carrier continua no
 caminho cabeado — só quem responde `0` explicitamente é considerada sem link.
+
+O carrier não se lê no instante em que o link sobe: a autonegociação gigabit
+leva de 1 a 3 s, e a placa responde `0` nesse meio-tempo, com cabo perfeito.
+Por isso, só com `wifi.conf` preenchido, a primeira rodada sobe todas as
+cabeadas e espera até `NB_CARRIER_WAIT` segundos (15) por um carrier; as
+rodadas seguintes leem na hora. Máquina sem placa cabeada não espera. O boot
+diz o que cada placa respondeu: `using the wired path: eth0=1`, ou
+`no cable detected (after 15s: eth0=0); trying wifi first`.
 
 ### O arquivo é limpo uma vez, na entrada
 
@@ -471,7 +581,7 @@ o piso do que se encontra em sala (VGA texto 80x25). Sem isso o banner rola
 para fora e some justamente a parte que faz a pessoa olhar; há teste medindo a
 altura de cada tela.
 
-Telas existentes: `NO IMAGE`, `NO NETWORK`, `NO SERVER`, `NO DISK`,
+Telas existentes: `NO CONF`, `NO IMAGE`, `NO NETWORK`, `NO SERVER`, `NO DISK`,
 `NO SYSTEM`, `LOW RAM`, `NO VM` e `REMOVED`. A de disco é a mais elaborada:
 usa o registro que o próprio scan produziu para dizer a causa mais provável —
 Fast Startup do Windows, BitLocker, falta de espaço ou controladora em RAID —
@@ -512,7 +622,7 @@ O módulo `20-secrets.sh` escreve `/etc/.nb3` (modo 600). É o contrato entre o
 boot e o sistema em execução:
 
 ```sh
-NB_SERVER='https://nutellaboot.naquadah.com.br'
+NB_SERVER='https://nutellaboot.mdp.naquadah.com.br'
 IMAGEROOT='26brbr'
 NB_MACHINE_KEY='nb3m_...'
 NB_BOOT_KEY='nb3b_...'
@@ -520,6 +630,15 @@ NB_LOCK_THEME='classico'
 NB_LOCK_FALLBACK_HASH='<salt>$<sha256>'
 NB_LANGUAGE='pt'
 ```
+
+E só ali. O `/run` do initrd é **movido** para o sistema montado (`mount -o
+move` no `/init` do initramfs-tools), e a cópia do `nutellaboot.conf` que o
+bootstrap guardava em `/run/nutellaboot` chegava junto: a chave de boot legível
+por qualquer usuário, ao lado do `/etc/.nb3` em 600. O mesmo com o `wifi.conf`,
+cujas senhas os perfis do NetworkManager guardam em 600. Hoje o initrd apaga o
+conf assim que o lê, e o stuff (`nb3_limpa_run`, depois do último consumidor, o
+`80-nm-wifi.sh`) apaga os dois — o que cobre também os pendrives com initrd
+antigo.
 
 Quem lê esse arquivo:
 

@@ -140,6 +140,18 @@ def test_o_stuff_separa_a_lista_do_firewall_por_virgula(imagem):
     ), linha
 
 
+def test_nome_com_sublinhado_chega_a_maquina(imagem, raiz):
+    """O nome de prova que o MOJ gera tem `_`: passa pela validação do
+    servidor, sai no stuff e vira hosts/<nome> com o IP, como qualquer outro."""
+    nome = "saad_2026_2_tg_prova_1_parte_1.moj.naquadah.com.br"
+    config.write_values("sala1", {"FIREWALL_ALLOWLIST": [*DOIS_HOSTS, f"{nome} 177.70.23.195"]}, is_admin=True)
+    r = roda_consumidor(imagem, "nb3_post_firewall", raiz)
+    assert r.returncode == 0, r.stderr
+    hosts = raiz / "usr/share/maratona-firewall/hosts"
+    assert (hosts / nome).read_text().strip() == "177.70.23.195"
+    assert (hosts / "boca-server").read_text().strip() == "200.145.148.81"
+
+
 def test_host_com_barra_nao_escreve_fora_de_hosts(imagem, raiz, data_root):
     """O nome vira caminho de arquivo, como root, dentro do sistema montado.
     O servidor recusa o valor; isto é a segunda tranca, para um stuff gerado
@@ -175,29 +187,117 @@ def test_entrada_maratona_e_pulada(imagem, raiz):
 # --- a sobrescrita do filtro de /etc/hosts da base publicada
 
 
+# O script e o /etc/hosts como estão na camada base publicada
+# (maratonalinux2026, pacote maratona-firewall 20240530).
+FIXTURES = REPO / "tests" / "fixtures"
+BASE_PUBLICADA = (FIXTURES / "maratona-firewall-20240530.sh").read_text()
+HOSTS_DA_BASE = (FIXTURES / "hosts-maratonalinux2026").read_text()
+
+DESCARTA_PELO_IP = """#!/bin/bash
+awk -v ip="$IP" -v host="$HOSTNAME" '
+    $1 == ip { next }
+' /etc/hosts > $TMPFILE
+"""
+
 DEFEITUOSO = """#!/bin/bash
 IP="$(head -n1 $LATAMHOST)"
 egrep -v "($IP|$HOSTNAME)" /etc/hosts > $TMPFILE
 """
 
+FIREWALL = REPO / "client/stuff/60-postmount.d/30-firewall.sh"
 
-def test_a_base_defeituosa_e_corrigida(imagem, raiz):
-    """A base publicada apaga linhas do /etc/hosts por SUBSTRING (o egrep sem
-    âncora): o hosts/maratona levava junto qualquer host do whitelist com
-    "maratona" no nome. Enquanto a base não for reconstruída, o boot troca o
-    script pela versão corrigida."""
+
+def _texto_embutido() -> str:
+    script = FIREWALL.read_text()
+    ini = script.index("<< 'NB3FWEOF'\n") + len("<< 'NB3FWEOF'\n")
+    return script[ini : script.index("\nNB3FWEOF\n", ini) + 1]
+
+
+def _gatilho_casa(texto: str, tmp_path) -> bool:
+    """Roda o `grep` do gatilho, como está no 30-firewall.sh, contra um texto."""
+    linha = next(l for l in FIREWALL.read_text().splitlines() if "grep -qF" in l)
+    grep = linha[linha.index("grep -qF") : linha.index('"$_fwsh"; then')]
+    alvo = tmp_path / "alvo.sh"
+    alvo.write_text(texto)
+    return subprocess.run(["sh", "-c", grep + ' "$1"', "_", str(alvo)]).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "velho",
+    [DEFEITUOSO, BASE_PUBLICADA, DESCARTA_PELO_IP],
+    ids=["egrep-20230113", "grep-20240530-base-publicada", "awk-que-descarta-pelo-ip"],
+)
+def test_a_base_defeituosa_e_corrigida(imagem, raiz, velho):
+    """O filtro do /etc/hosts do pacote errou de três jeitos, um por versão:
+    regex por SUBSTRING (o hosts/maratona levava qualquer entrada com
+    "maratona"), a mesma regex com `grep --invert-match` (a base publicada),
+    e o awk que descartava pelo IP (dois nomes atrás do mesmo proxy se
+    apagavam). A troca reconhecia só o primeiro, e nunca disparou na base
+    publicada. Os três são trocados pelo script corrigido."""
     alvo = raiz / "usr/share/maratona-firewall/maratona-firewall-configuration.sh"
-    alvo.write_text(DEFEITUOSO)
+    alvo.write_text(velho)
 
     r = roda_consumidor(imagem, "nb3_post_firewall", raiz)
     assert r.returncode == 0, r.stderr
-    texto = alvo.read_text()
-    assert "egrep -v" not in texto
-    assert 'awk -v ip="$IP" -v host="$HOSTNAME"' in texto
+    assert alvo.read_text() == _texto_embutido()
     assert alvo.stat().st_mode & 0o111, "o serviço executa o script direto"
     ok = subprocess.run(["bash", "-n", str(alvo)], capture_output=True, text=True)
     assert ok.returncode == 0, ok.stderr
-    assert "patching maratona-firewall" in r.stdout + r.stderr
+    assert "with the /etc/hosts filter fix" in r.stdout + r.stderr
+
+
+def test_o_texto_embutido_nao_dispara_o_gatilho(tmp_path):
+    """Quando a base vier com o pacote corrigido, a troca se aposenta sozinha:
+    o script corrigido não pode conter nenhum dos padrões do gatilho."""
+    assert _gatilho_casa(BASE_PUBLICADA, tmp_path)
+    assert not _gatilho_casa(_texto_embutido(), tmp_path)
+
+
+def _roda_filtro(script: str, entradas: dict, tmp_path) -> list[str]:
+    """Roda o script do firewall de verdade (com o `ufw` mudo) sobre o
+    /etc/hosts da base, com os hosts/ dados."""
+    d = tmp_path / f"fw{len(list(tmp_path.iterdir()))}"
+    (d / "hosts").mkdir(parents=True)
+    (d / "nada").mkdir()
+    for nome, ip in entradas.items():
+        (d / "hosts" / nome).write_text(ip + "\n")
+    hosts = d / "etc-hosts"
+    hosts.write_text(HOSTS_DA_BASE)
+    texto = (
+        script.replace("/usr/share/maratona-firewall/hosts/*", f"{d}/hosts/*")
+        .replace("/etc/maratona-firewall/hosts/*", f"{d}/nada/*")
+        .replace("/etc/maratona-firewall/ufwrules/*", f"{d}/nada/*")
+        .replace("/etc/hosts", str(hosts))
+    )
+    (d / "fw.sh").write_text(texto)
+    r = subprocess.run(
+        ["bash", "-c", f'ufw() {{ :; }}; export -f ufw; bash "{d}/fw.sh"'],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    return hosts.read_text().splitlines()
+
+
+def test_o_filtro_corrigido_no_hosts_real_da_base(tmp_path):
+    """No /etc/hosts da base publicada: a base perde o "moj" (mesmo IP do
+    nutellaboot) e o "boca.maratona.br" (substring de "maratona"); o script
+    corrigido mantém os dois, e o 127.0.1.1 fica só com o nome da máquina (a
+    base traz o da VM que a construiu)."""
+    entradas = {
+        "boca.maratona.br": "10.0.0.9",
+        "moj.sede": "200.19.248.54",
+        "nutellaboot.sede": "200.19.248.54",
+        "maratona": "127.0.1.1",
+    }
+    antes = _roda_filtro(BASE_PUBLICADA, entradas, tmp_path)
+    assert "200.19.248.54\tmoj.sede" not in antes
+    assert "10.0.0.9\tboca.maratona.br" not in antes
+
+    depois = _roda_filtro(_texto_embutido(), entradas, tmp_path)
+    for nome, ip in entradas.items():
+        assert f"{ip}\t{nome}" in depois, (nome, depois)
+    assert [l for l in depois if l.split()[:1] == ["127.0.1.1"]] == ["127.0.1.1\tmaratona"]
+    assert "127.0.0.1 localhost" in depois
 
 
 def test_a_base_ja_corrigida_fica_intacta(imagem, raiz):
@@ -209,7 +309,7 @@ def test_a_base_ja_corrigida_fica_intacta(imagem, raiz):
     r = roda_consumidor(imagem, "nb3_post_firewall", raiz)
     assert r.returncode == 0, r.stderr
     assert alvo.read_text() == "#!/bin/bash\n# sentinela: versao nova do pacote\n"
-    assert "patching" not in r.stdout + r.stderr
+    assert "filter fix" not in r.stdout + r.stderr
 
 
 # --- dconf: lista GVariant
@@ -573,3 +673,126 @@ def test_sem_wifi_conf_nao_escreve_nada(imagem, raiz, tmp_path):
     r = roda_consumidor(imagem, "nb3_post_nm_wifi", raiz, extra=com_wifi(tmp_path, "# só comentário\n"))
     assert r.returncode == 0, r.stderr
     assert perfis(raiz) == {}
+
+
+# --- identidade: qual MAC é "o" MAC, e o machine-id derivado dele -------------
+#
+# A chave da máquina no servidor é um MAC. Bootar por cabo, wifi ou adaptador
+# USB não pode virar três máquinas; e o machine-id, que era um id aleatório
+# gerado pelo systemd numa home clonada por imagem de disco, apareceu repetido
+# em 62 grupos de máquinas no relatório do MOJ.
+
+
+import hashlib
+
+
+class SysNet:
+    """Uma /sys/class/net de mentira, com `device` como symlink de verdade —
+    é pelo caminho resolvido que o stuff reconhece um adaptador USB."""
+
+    def __init__(self, tmp):
+        self.raiz = tmp / "sysnet"
+        self.raiz.mkdir()
+        self.devices = tmp / "devices"
+
+    def add(self, nome, mac, *, bus="pci0000:00/0000:03:00.0", wifi=False, fisica=True):
+        d = self.raiz / nome
+        d.mkdir()
+        (d / "address").write_text(mac + "\n")
+        if fisica:
+            alvo = self.devices / bus
+            alvo.mkdir(parents=True, exist_ok=True)
+            (d / "device").symlink_to(alvo)
+        if wifi:
+            (d / "wireless").mkdir()
+
+
+def _identidade(imagem, raiz, sysnet, cmdline="boot=nutellaboot"):
+    (raiz / "var/lib/dbus").mkdir(parents=True, exist_ok=True)
+    (raiz / "home").mkdir(exist_ok=True)
+    cmd = raiz.parent / "cmdline"
+    cmd.write_text(cmdline + "\n")
+    r = roda_consumidor(
+        imagem,
+        "nb3_post_machineid",
+        raiz,
+        extra=f'NB_SYS_NET="{sysnet.raiz}"; NB_CMDLINE="{cmd}"',
+    )
+    assert r.returncode == 0, r.stderr
+    return r
+
+
+def _md5(mac):
+    return hashlib.md5(mac.encode()).hexdigest()
+
+
+def test_a_cabeada_interna_vence_wifi_e_usb(imagem, raiz, tmp_path):
+    net = SysNet(tmp_path)
+    net.add("wlp2s0", "34:6F:24:DC:27:DD", bus="pci0000:00/0000:02:00.0", wifi=True)
+    net.add("enx001122334455", "00:11:22:33:44:55", bus="pci0000:00/0000:00:14.0/usb1/1-3/1-3:1.0")
+    net.add("enp3s0", "58:11:22:99:FC:6A")
+    net.add("docker0", "02:42:ab:cd:ef:01", fisica=False)
+    _identidade(imagem, raiz, net)
+    assert (raiz / "etc/mac-icpc").read_text().strip() == "58-11-22-99-fc-6a"
+    assert (raiz / "home/.machine-id").read_text().strip() == _md5("58-11-22-99-fc-6a")
+
+
+def test_sem_cabeada_vale_a_wifi_interna_nao_o_usb(imagem, raiz, tmp_path):
+    net = SysNet(tmp_path)
+    net.add("enx001122334455", "00:11:22:33:44:55", bus="pci0000:00/0000:00:14.0/usb1/1-3/1-3:1.0")
+    net.add("wlp2s0", "34:6f:24:dc:27:dd", bus="pci0000:00/0000:02:00.0", wifi=True)
+    _identidade(imagem, raiz, net)
+    assert (raiz / "etc/mac-icpc").read_text().strip() == "34-6f-24-dc-27-dd"
+
+
+def test_so_usb_vale_o_bootif_e_sem_ele_o_proprio_usb(imagem, raiz, tmp_path):
+    net = SysNet(tmp_path)
+    net.add("enx001122334455", "00:11:22:33:44:55", bus="pci0000:00/0000:00:14.0/usb1/1-3/1-3:1.0")
+    _identidade(imagem, raiz, net, cmdline="boot=nutellaboot BOOTIF=01-00-11-22-33-44-55")
+    assert (raiz / "etc/mac-icpc").read_text().strip() == "00-11-22-33-44-55"
+    _identidade(imagem, raiz, net)
+    assert (raiz / "etc/mac-icpc").read_text().strip() == "00-11-22-33-44-55"
+
+
+def test_o_machine_id_e_estavel_e_sobrescreve_o_herdado(imagem, raiz, tmp_path):
+    """Rodar de novo, com a home limpa (`cleanhome`) ou com um id antigo de
+    home clonada: sempre o mesmo md5 do MAC."""
+    net = SysNet(tmp_path)
+    net.add("enp3s0", "58:11:22:99:fc:6a")
+    _identidade(imagem, raiz, net)
+    esperado = _md5("58-11-22-99-fc-6a")
+    assert (raiz / "home/.machine-id").read_text().strip() == esperado
+    (raiz / "home/.machine-id").write_text("0123456789abcdef0123456789abcdef\n")  # clone
+    _identidade(imagem, raiz, net)
+    assert (raiz / "home/.machine-id").read_text().strip() == esperado
+    (raiz / "home/.machine-id").unlink()  # cleanhome
+    _identidade(imagem, raiz, net)
+    assert (raiz / "home/.machine-id").read_text().strip() == esperado
+    assert (raiz / "etc/machine-id").is_symlink() and (raiz / "var/lib/dbus/machine-id").is_symlink()
+
+
+def test_sem_placa_nenhuma_avisa_e_deixa_o_systemd_gerar(imagem, raiz, tmp_path):
+    net = SysNet(tmp_path)
+    net.add("lo", "00:00:00:00:00:00", fisica=False)
+    r = _identidade(imagem, raiz, net)
+    assert (raiz / "etc/mac-icpc").read_text().strip() == ""
+    assert (raiz / "home/.machine-id").read_text() == ""
+    assert "no stable MAC" in r.stdout + r.stderr
+
+
+def _nb3_le(raiz, var):
+    r = subprocess.run(["sh", "-c", f'. "{raiz}/etc/.nb3"; printf %s "${var}"'],
+                       capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_o_limite_de_monitores_chega_ao_agente(imagem, raiz):
+    """Campo "Monitores permitidos" → stuff (MAXMONITORS) → /etc/.nb3
+    (NB_MAX_MONITORS), que o agente lê para o alerta display.multiple."""
+    assert "MAXMONITORS='1'" in stuffgen.render(imagem), "o padrão é um monitor"
+    assert roda_consumidor(imagem, "nb3_post_secrets", raiz).returncode == 0
+    assert _nb3_le(raiz, "NB_MAX_MONITORS") == "1"
+    config.write_values(imagem, {"MAXMONITORS": "2"}, is_admin=True)
+    assert roda_consumidor(imagem, "nb3_post_secrets", raiz).returncode == 0
+    assert _nb3_le(raiz, "NB_MAX_MONITORS") == "2"

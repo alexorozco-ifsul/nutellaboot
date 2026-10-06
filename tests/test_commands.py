@@ -146,6 +146,28 @@ def test_command_only_reaches_target_machine(client, img, hm, hi):
     assert len(client.get(f"/api/v1/site-images/testes3/machines/{outra}/commands", headers=hm).json()["commands"]) == 1
 
 
+def test_corpo_que_escolhe_maquinas_no_campo_errado_e_recusado(client, img, hm, hi):
+    """Sem `target` o padrão é a sala inteira. Um corpo com `macs` QUIS escolher
+    máquinas e errou o campo (foi o que o nb3-api fez): obedecer o padrão ali é
+    desligar a sala toda por engano."""
+    for mac in (MAC, "52-54-00-ab-cd-02"):
+        client.post(f"/api/v1/site-images/testes3/machines/{mac}/status", json={}, headers=hm)
+    for corpo in (
+        {"command": "mlreboot", "macs": [MAC]},
+        {"command": "mlreboot", "mac": MAC},
+        {"command": "mlreboot", "targets": {"testes3": [MAC]}},
+        {"command": "mlreboot", "target": MAC},  # string: seria lida letra a letra
+    ):
+        r = client.post(f"/api/v1/site-images/testes3/commands", json=corpo, headers=hi)
+        assert r.status_code == 400, corpo
+        assert "target" in r.json()["detail"]
+    maquinas = client.get(f"/api/v1/site-images/testes3/machines", headers=hi).json()["machines"]
+    assert [x["pending"] for x in maquinas] == [0, 0]
+    # e o contrato: sem nenhum desses campos, a sala inteira
+    r = client.post(f"/api/v1/site-images/testes3/commands", json={"command": "mlreboot"}, headers=hi)
+    assert r.status_code == 200 and r.json()["machines"] == 2
+
+
 def test_delay_holds_command(client, img, hm, hi):
     client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
     client.post(
@@ -205,6 +227,34 @@ def test_lock_sets_state_and_command(client, img, hm, hi):
 
     client.post(f"/api/v1/site-images/testes3/machines/{MAC}/unlock", headers=hi)
     assert client.get(f"/boot/v3/testes3/machines/{MAC}/lockstate").text.strip() == "unlocked"
+
+
+def test_a_trava_da_sede_inteira_recusa_lista_de_maquinas(client, img, hm, hi):
+    """O painel da frota, com só algumas máquinas marcadas, chamava a rota da
+    SEDE para cada sede tocada: a sala toda travava, e a confirmação mostrava o
+    número menor. A rota da sede não lê corpo; um corpo que escolhe máquinas é
+    recusado, e nada muda (nem a trava, nem a fila)."""
+    outra = "52-54-00-ab-cd-03"
+    for mac in (MAC, outra):
+        client.post(f"/api/v1/site-images/testes3/machines/{mac}/status", json={}, headers=hm)
+    for rota in ("lock", "unlock"):
+        for corpo in ({"target": [MAC]}, {"macs": [MAC]}, {"mac": MAC}, {"machines": [MAC]}, {"targets": {"testes3": [MAC]}}):
+            r = client.post(f"/api/v1/site-images/testes3/{rota}", json=corpo, headers=hi)
+            assert r.status_code == 400, (rota, corpo)
+            assert r.json()["code"] == "no_target"
+    for mac in (MAC, outra):
+        assert client.get(f"/boot/v3/testes3/machines/{mac}/lockstate").text.strip() == "unlocked"
+        assert client.get(f"/api/v1/site-images/testes3/machines/{mac}/commands", headers=hm).json()["commands"] == []
+
+    # sem corpo, `{}` e `{"target": "all"}` continuam sendo a sala inteira
+    for corpo in (None, {}, {"target": "all"}):
+        kw = {} if corpo is None else {"json": corpo}
+        r = client.post("/api/v1/site-images/testes3/lock", headers=hi, **kw)
+        assert r.status_code == 200 and r.json()["machines"] == 2, corpo
+        for mac in (MAC, outra):
+            assert client.get(f"/boot/v3/testes3/machines/{mac}/lockstate").text.strip() == "locked"
+        r = client.post("/api/v1/site-images/testes3/unlock", headers=hi, **kw)
+        assert r.status_code == 200 and r.json()["machines"] == 2, corpo
 
 
 def test_precontest_grava_a_trava_no_servidor(client, img, hm, hi):
@@ -337,3 +387,155 @@ def test_a_rota_diz_o_que_pode_ser_mandado(client, uma_maquina, hi, admin_key):
 
     ha = {"Authorization": f"Bearer {admin_key}"}
     assert client.get("/api/v1/site-images/testes3/commands", headers=ha).json()["blocked"] == {}
+
+
+# --- validade das ordens -----------------------------------------------------
+#
+# O alvo "all" é resolvido no envio para toda máquina com machine.json —
+# inclusive as desligadas. Sem validade, um poweroff mandado hoje esperava a
+# máquina ligar amanhã (e desligava a sala do dia seguinte). O nb2 filtrava os
+# últimos 600 s; a fila com ack tinha perdido a janela.
+
+
+def _envelhece(data_root, segundos, mac=MAC):
+    q = data_root / "site-images" / "testes3" / "machines" / mac / "queue"
+    for f in q.glob("*.json"):
+        e = fsdb.read_json(f)
+        e["created_at"] -= segundos
+        e["not_before"] -= segundos
+        fsdb.write_json(f, e)
+
+
+def _manda_poweroff(client, hi, **extra):
+    r = client.post(
+        "/api/v1/site-images/testes3/commands",
+        json={"command": "mlpoweroff", "target": "all", **extra},
+        headers=hi,
+    )
+    return r.json()["command_id"]
+
+
+def test_ordem_velha_caduca_e_vira_expired_no_acks(client, img, hm, hi, data_root):
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
+    cid = _manda_poweroff(client, hi)
+    _envelhece(data_root, 700)
+
+    assert client.get(f"/api/v1/site-images/testes3/machines/{MAC}/commands", headers=hm).json()["commands"] == []
+    assert m.pending_commands("testes3", MAC) == []
+    q = data_root / "site-images" / "testes3" / "machines" / MAC / "queue"
+    assert list(q.glob("*.json")) == [], "caducada é apagada, não só escondida"
+
+    acks = client.get(f"/api/v1/site-images/testes3/machines/{MAC}/logs", headers=hi).json()["acks"]
+    assert [(a["id"], a["status"], a["command"]) for a in acks] == [(cid, "expired", "mlpoweroff")]
+
+
+def test_o_ttl_conta_do_not_before_nao_do_created_at(client, img, hm, hi, data_root):
+    """Ordem com delay de 15 min não pode caducar antes de nascer."""
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
+    _manda_poweroff(client, hi, delay=900)
+    _envelhece(data_root, 700)  # not_before ainda 200 s no futuro
+
+    assert client.get(f"/api/v1/site-images/testes3/machines/{MAC}/commands", headers=hm).json()["commands"] == []
+    assert len(m.pending_commands("testes3", MAC)) == 1
+    assert client.get(f"/api/v1/site-images/testes3/machines/{MAC}/logs", headers=hi).json()["acks"] == []
+
+
+def test_ordem_de_500_s_ainda_entrega(client, img, hm, hi, data_root):
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
+    _manda_poweroff(client, hi)
+    _envelhece(data_root, 500)
+    cmds = client.get(f"/api/v1/site-images/testes3/machines/{MAC}/commands", headers=hm).json()["commands"]
+    assert [c["command"] for c in cmds] == ["mlpoweroff"]
+
+
+def test_ttl_configuravel_no_server_json(client, img, hm, hi, data_root):
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
+
+    fsdb.write_json(data_root / "server.json", {"command_ttl_sec": 60})
+    _manda_poweroff(client, hi)
+    _envelhece(data_root, 120)
+    assert client.get(f"/api/v1/site-images/testes3/machines/{MAC}/commands", headers=hm).json()["commands"] == []
+
+    fsdb.write_json(data_root / "server.json", {"command_ttl_sec": 3600})
+    _manda_poweroff(client, hi)
+    _envelhece(data_root, 700)
+    assert len(client.get(f"/api/v1/site-images/testes3/machines/{MAC}/commands", headers=hm).json()["commands"]) == 1
+
+
+def test_o_pending_do_painel_nao_conta_a_caducada(client, img, hm, hi, data_root):
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
+    _manda_poweroff(client, hi)
+    _envelhece(data_root, 700)
+    maquinas = client.get("/api/v1/site-images/testes3/machines", headers=hi).json()["machines"]
+    assert maquinas[0]["pending"] == 0
+
+
+# --- o ack diz QUAL comando foi confirmado; reset de editores e boots --------
+
+
+def test_ack_registra_o_nome_do_comando(client, img, hm, hi, data_root):
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
+    cid = client.post(
+        "/api/v1/site-images/testes3/commands", json={"command": "mlreboot", "target": "all"}, headers=hi
+    ).json()["command_id"]
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/commands/{cid}/ack", json={"status": "done"}, headers=hm)
+    acks = client.get(f"/api/v1/site-images/testes3/machines/{MAC}/logs", headers=hi).json()["acks"]
+    assert acks[-1]["id"] == cid and acks[-1]["command"] == "mlreboot"
+
+
+@pytest.mark.parametrize("comando", ["resetcontaeditores", "precontest"])
+def test_reset_de_editores_marca_desde_quando_a_contagem_vale(client, img, hm, hi, comando):
+    """`editors_time` é acumulado desde a instalação; quem lê precisa saber
+    quando foi o último reset — o MOJ tinha 7.972 minutos e nenhuma data."""
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
+    assert "editors_reset_at" not in client.get(f"/api/v1/site-images/testes3/machines/{MAC}", headers=hi).json()
+    cid = client.post(
+        "/api/v1/site-images/testes3/commands", json={"command": comando, "target": "all"}, headers=hi
+    ).json()["command_id"]
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/commands/{cid}/ack", json={"status": "done"}, headers=hm)
+    maq = client.get(f"/api/v1/site-images/testes3/machines/{MAC}", headers=hi).json()
+    assert time.time() - maq["editors_reset_at"] < 5
+
+
+def test_reset_com_erro_nao_marca_e_outro_comando_tambem_nao(client, img, hm, hi):
+    client.post(f"/api/v1/site-images/testes3/machines/{MAC}/status", json={}, headers=hm)
+    for comando, status in (("resetcontaeditores", "error"), ("mlreboot", "done")):
+        cid = client.post(
+            "/api/v1/site-images/testes3/commands", json={"command": comando, "target": "all"}, headers=hi
+        ).json()["command_id"]
+        client.post(f"/api/v1/site-images/testes3/machines/{MAC}/commands/{cid}/ack", json={"status": status}, headers=hm)
+    assert "editors_reset_at" not in client.get(f"/api/v1/site-images/testes3/machines/{MAC}", headers=hi).json()
+
+
+def test_boot_id_novo_conta_um_boot(client, img, hm, hi):
+    rota = f"/api/v1/site-images/testes3/machines/{MAC}/status"
+    client.post(rota, json={"hwinfo": {"boot_id": "a"}}, headers=hm)
+    client.post(rota, json={"hwinfo": {"boot_id": "a"}}, headers=hm)
+    maq = client.get(f"/api/v1/site-images/testes3/machines/{MAC}", headers=hi).json()
+    assert maq["boots"] == 1 and maq["boot_id"] == "a"
+    assert time.time() - maq["last_boot"] < 5, "sem last_boot do agente vale o primeiro contato"
+
+    client.post(rota, json={"hwinfo": {"boot_id": "b", "last_boot": 1700000000}}, headers=hm)
+    maq = client.get(f"/api/v1/site-images/testes3/machines/{MAC}", headers=hi).json()
+    assert maq["boots"] == 2 and maq["boot_id"] == "b" and maq["last_boot"] == 1700000000
+
+    client.post(rota, json={}, headers=hm)  # agente sem hwinfo: nada muda
+    assert client.get(f"/api/v1/site-images/testes3/machines/{MAC}", headers=hi).json()["boots"] == 2
+
+
+def test_lista_filtra_por_active_since(client, img, hm, hi, data_root):
+    outra = "52-54-00-aa-bb-cc"
+    for mac in (MAC, outra):
+        client.post(f"/api/v1/site-images/testes3/machines/{mac}/status", json={}, headers=hm)
+    p = data_root / "site-images" / "testes3" / "machines" / outra / "machine.json"
+    info = fsdb.read_json(p)
+    info["last_seen"] = time.time() - 86400 * 3
+    fsdb.write_json(p, info)
+
+    todos = client.get("/api/v1/site-images/testes3/machines", headers=hi).json()["machines"]
+    assert {q["mac"] for q in todos} == {MAC, outra}
+    corte = int(time.time() - 3600)
+    r = client.get(f"/api/v1/site-images/testes3/machines?active_since={corte}", headers=hi).json()
+    assert [q["mac"] for q in r["machines"]] == [MAC]
+    r = client.get(f"/api/v1/site-images/testes3/machines?active_since={int(time.time()) + 10}", headers=hi).json()
+    assert r["machines"] == [] and "rejected" not in r, "lista vazia por filtro não é 'ninguém consegue reportar'"

@@ -6,14 +6,16 @@ import asyncio
 import json
 import os
 import time
+import zlib
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from .. import auth
-from ..services import alerts, logs
+from .. import auth, fsdb
+from ..errors import erro
+from ..services import alerts, command_log, logs, presence
 from ..services import machines as m
-from ..services import webhook_push
+from ..services import eventos
 from ..services.notify import notify
 
 router = APIRouter(prefix="/api/v1")
@@ -46,14 +48,22 @@ def _machine(image: str, x_nb_machine_key: str | None, mac: str) -> str:
         # quebrada. Guardar isso é o que faz o painel poder dizer por que não
         # aparece máquina nenhuma, em vez de só mostrar a lista vazia.
         m.record_rejected(image, mac[:64])
-        raise HTTPException(400, "MAC inválido")
+        raise erro(400, "invalid_mac", "MAC inválido")
     return mac
+
+
+def _contexto(image: str, mac: str) -> dict:
+    """O que poupa ao destinatário de um alerta uma segunda consulta: em qual
+    boot foi, e de que time é a máquina."""
+    d = m.machine_dir(image, mac)
+    boot = (fsdb.read_json(d / "machine.json", {}) or {}).get("boot_id", "")
+    uid = (fsdb.read_json(d / "binding.json", {}) or {}).get("user_id")
+    return {"boot_id": boot, "binding": {"user_id": uid} if uid else None}
 
 
 def publicar_evento(image: str, event: str, data: dict) -> None:
     """Avisa o painel (SSE) e os sistemas externos inscritos (webhooks)."""
-    notify.publish(image, {"event": event, "data": data, "at": time.time()})
-    webhook_push.emit(image, event, data)
+    eventos.publicar(image, event, data)
 
 
 # A telemetria é um dict livre (o servidor não conhece o formato de propósito:
@@ -78,9 +88,27 @@ async def post_status(
     if not isinstance(body, dict):
         raise HTTPException(400, "telemetria precisa ser um objeto JSON")
     res = m.record_status(image, mac, body)
+    presence.marcar(image, mac)
     publicar_evento(image, "machine.status", {"mac": mac})
     if res["first_seen"]:
         publicar_evento(image, "machine.first_seen", {"mac": mac})
+    info = res["info"]
+    if res["offline_for"]:
+        publicar_evento(image, "machine.online", {"mac": mac, "offline_for": res["offline_for"]})
+    if res["rebooted"]:
+        publicar_evento(
+            image,
+            "machine.rebooted",
+            {
+                "mac": mac,
+                "boot_id": info.get("boot_id", ""),
+                "previous_boot_id": res["previous_boot_id"],
+                "boots": info.get("boots"),
+                "last_boot": int(info.get("last_boot") or 0),
+            },
+        )
+    if res.get("alert"):
+        publicar_evento(image, "alert.raised", {"mac": mac, **res["alert"], **_contexto(image, mac)})
     return {
         "pending_commands": len(m.ready_commands(image, mac)),
         "lock": m.get_lock(image, mac),
@@ -124,35 +152,97 @@ async def get_logs(
     }
 
 
-# o teto do payload de série: 24 h a 45 s são ~1900 amostras, e ninguém
-# distingue isso numa tela — o mesmo passo-inteiro do labs_series
+# o teto PADRÃO do payload de série: 24 h a ~50 s são ~1700 amostras, e
+# ninguém distingue isso numa tela. Quem analisa (o MOJ) pede `limit` maior.
 MAX_AMOSTRAS = 400
+MAX_AMOSTRAS_TETO = 5000
 
 
+# `def`, não `async def`: lê até 2 MiB por máquina, e no event loop único
+# (invariante 2) isso travaria o long-poll de toda a frota. O FastAPI roda a
+# rota síncrona no threadpool.
 @router.get("/site-images/{image}/machines/{mac}/samples")
-async def get_samples(
+def get_samples(
     image: str,
     mac: str,
     since: float = Query(0, ge=0),
     until: float = Query(0, ge=0),
+    limit: int = Query(MAX_AMOSTRAS, ge=1, le=MAX_AMOSTRAS_TETO),
     p=Depends(auth.require_image_access(service_scope="machines:read")),
 ) -> dict:
-    """A série da máquina para os gráficos do console — o que o
-    `samples.jsonl` guarda (mem %, load1, swap MB, /home %)."""
+    """A série da máquina (o que o `samples.jsonl` guarda), reamostrada a
+    `limit` pontos mantendo o primeiro e o último, com os metadados do que foi
+    feito (`resampled`, `native_points`, `interval_s`) e `truncated` só
+    quando o teto do arquivo cortou de fato dentro da janela."""
     from ..services import samples
 
-    mac = m.normalize_mac(mac)
-    pontos = samples.series(image, mac, since, until)
-    if len(pontos) > MAX_AMOSTRAS:
-        passo = len(pontos) / MAX_AMOSTRAS
-        pontos = [pontos[int(i * passo)] for i in range(MAX_AMOSTRAS)]
-    return {
-        "mac": mac,
-        "points": pontos,
-        # o cap por máquina já descartou a metade antiga pelo menos uma vez:
-        # a tela avisa que o começo do intervalo pode não existir mais
-        "truncated": samples.foi_truncado(image, mac),
-    }
+    return samples.janela(image, m.normalize_mac(mac), since, until, limit)
+
+
+@router.get("/site-images/{image}/samples")
+def get_samples_lote(
+    image: str,
+    since: float = Query(0, ge=0),
+    until: float = Query(0, ge=0),
+    limit: int = Query(MAX_AMOSTRAS, ge=1, le=MAX_AMOSTRAS_TETO),
+    active_since: float = Query(0, ge=0),
+    request: Request = None,
+    p=Depends(auth.require_image_access(service_scope="machines:read")),
+) -> StreamingResponse:
+    """Todas as máquinas da sede de uma vez: uma linha NDJSON por máquina, no
+    mesmo formato da rota individual. Um request por sede em vez de um por
+    máquina (o MOJ fazia 1.700 por coleta). O gerador é SÍNCRONO de
+    propósito: o Starlette o itera no threadpool, máquina a máquina, sem
+    montar tudo em memória."""
+    from .. import fsdb
+    from ..services import samples
+
+    def gerar():
+        for mac in m.list_macs(image):
+            if active_since:
+                info = fsdb.read_json(m.machine_dir(image, mac) / "machine.json", {}) or {}
+                if (info.get("last_seen") or 0) < active_since:
+                    continue
+            try:
+                corpo = samples.janela(image, mac, since, until, limit)
+            except OSError:
+                continue
+            yield json.dumps(corpo, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+    cabecalhos = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Vary": "Accept-Encoding"}
+    corpo = gerar()
+    if _aceita_gzip(request.headers.get("accept-encoding", "")):
+        # Só aqui, e à mão: um GZipMiddleware embrulharia também o SSE e o
+        # long-poll, que vivem de entregar cada byte na hora. Uma sede de 300
+        # máquinas são vários MB de JSON repetitivo; comprime ~10x.
+        cabecalhos["Content-Encoding"] = "gzip"
+        corpo = _gzip(corpo)
+    return StreamingResponse(corpo, media_type="application/x-ndjson", headers=cabecalhos)
+
+
+def _aceita_gzip(valor: str) -> bool:
+    for parte in valor.lower().split(","):
+        nome, _, params = parte.strip().partition(";")
+        if nome.strip() in ("gzip", "*"):
+            q = params.replace(" ", "").partition("q=")[2]
+            try:
+                return float(q) > 0 if q else True
+            except ValueError:
+                return True
+    return False
+
+
+def _gzip(linhas, a_cada: int = 16):
+    """Comprime o fluxo sem juntá-lo: descarrega a cada `a_cada` máquinas, para
+    o cliente ir recebendo (e o proxy não achar que a conexão morreu)."""
+    z = zlib.compressobj(6, zlib.DEFLATED, 31)  # 31 = contêiner gzip
+    for i, linha in enumerate(linhas, 1):
+        pedaco = z.compress(linha.encode())
+        if i % a_cada == 0:
+            pedaco += z.flush(zlib.Z_SYNC_FLUSH)
+        if pedaco:
+            yield pedaco
+    yield z.flush()
 
 
 @router.post("/site-images/{image}/machines/{mac}/events")
@@ -173,8 +263,10 @@ async def post_event(
         str(body.get("detail", "")),
         {"vendor": str(body.get("vendor", ""))[:120]} if body.get("vendor") else None,
     )
-    publicar_evento(image, "alert.raised", {"mac": mac, **alerta})
-    return {"ok": True, "id": alerta["id"]}
+    # o mesmo dispositivo com alerta ainda aberto não é mudança de estado
+    if not alerta.get("repeated"):
+        publicar_evento(image, "alert.raised", {"mac": mac, **alerta, **_contexto(image, mac)})
+    return {"ok": True, "id": alerta["id"], "repeated": bool(alerta.get("repeated"))}
 
 
 @router.get("/site-images/{image}/alerts")
@@ -184,30 +276,36 @@ async def list_alerts(
     return {"alerts": alerts.list_open(image)}
 
 
+# Dispensar alerta tinha o escopo de COMANDO: quem podia limpar a faixa vermelha
+# podia, por tabela, desligar a sala. `alerts:write` separa; `commands:write`
+# continua aceito para não quebrar a chave que o MOJ já tem.
+ESCOPO_DISPENSA = ("alerts:write", "commands:write")
+
+
 @router.post("/site-images/{image}/machines/{mac}/alerts/{alert_id}/dismiss")
 async def dismiss_alert(
     image: str,
     mac: str,
     alert_id: str,
-    p=Depends(auth.require_image_access(service_scope="commands:write")),
+    p=Depends(auth.require_image_access(service_scope=ESCOPO_DISPENSA)),
 ) -> dict:
     mac = m.normalize_mac(mac)
     alerta = alerts.dismiss(image, mac, alert_id, p.name or "console")
     if alerta is None:
         # dois fiscais clicando ao mesmo tempo é o caso normal, não um erro
         return {"ok": True, "already": True}
-    publicar_evento(image, "alert.dismissed", {"mac": mac, **alerta})
+    publicar_evento(image, "alert.dismissed", {"mac": mac, **alerta, **_contexto(image, mac)})
     return {"ok": True, "alert": alerta}
 
 
 @router.post("/site-images/{image}/machines/{mac}/alerts/dismiss-all")
 async def dismiss_all_alerts(
-    image: str, mac: str, p=Depends(auth.require_image_access(service_scope="commands:write"))
+    image: str, mac: str, p=Depends(auth.require_image_access(service_scope=ESCOPO_DISPENSA))
 ) -> dict:
     mac = m.normalize_mac(mac)
     limpos = alerts.dismiss_all(image, mac, p.name or "console")
     for a in limpos:
-        publicar_evento(image, "alert.dismissed", {"mac": mac, **a})
+        publicar_evento(image, "alert.dismissed", {"mac": mac, **a, **_contexto(image, mac)})
     return {"ok": True, "dismissed": len(limpos)}
 
 
@@ -218,6 +316,18 @@ async def alerts_history(
     p=Depends(auth.require_image_access(service_scope="machines:read")),
 ) -> dict:
     return {"history": alerts.history(image, m.normalize_mac(mac))}
+
+
+@router.get("/site-images/{image}/alerts/history")
+def alerts_history_da_sede(
+    image: str,
+    since: float = Query(0, ge=0),
+    n: int = Query(500, ge=1, le=5000),
+    p=Depends(auth.require_image_access(service_scope="machines:read")),
+) -> dict:
+    """Todos os alertas da sede, abertos e dispensados, com quem dispensou.
+    `def`: varre o alerts.log de cada máquina."""
+    return {"history": alerts.history_da_sede(image, since, n)}
 
 
 @router.get("/site-images/{image}/machines/{mac}/commands")
@@ -250,19 +360,27 @@ async def ack_command(
 ) -> dict:
     mac = _machine(image, x_nb_machine_key, mac)
     found = m.ack(image, mac, cid, {"status": body.get("status", "done"), "output": body.get("output", "")})
-    publicar_evento(image, "command.acked", {"mac": mac, "id": cid, "status": body.get("status")})
+    # `id` é o nome antigo do campo; `command_id` é o que o POST devolve
+    dados = {"mac": mac, "id": cid, "command_id": cid, "status": body.get("status")}
+    comando = (command_log.ler(image, cid) or {}).get("command")
+    if comando:
+        dados["command"] = comando
+    publicar_evento(image, "command.acked", dados)
     return {"ok": True, "found": found}
 
 
 @router.get("/site-images/{image}/machines")
 async def list_machines(
-    image: str, p=Depends(auth.require_image_access(service_scope="machines:read"))
+    image: str,
+    active_since: float = Query(0, ge=0),
+    p=Depends(auth.require_image_access(service_scope="machines:read")),
 ) -> dict:
-    maquinas = m.list_machines(image)
+    maquinas = m.list_machines(image, active_since)
     corpo = {"machines": maquinas}
-    # só quando não há máquina nenhuma: é aí que o painel vazio precisa
-    # explicar que alguém ESTÁ tentando, e com que identificação
-    if not maquinas:
+    # só quando não há máquina nenhuma (e sem filtro: lista vazia por
+    # `active_since` é normal): é aí que o painel vazio precisa explicar que
+    # alguém ESTÁ tentando, e com que identificação
+    if not maquinas and not active_since:
         rejeitadas = m.rejected(image)
         if rejeitadas:
             corpo["rejected"] = rejeitadas
@@ -317,20 +435,30 @@ async def create_command(
 ) -> dict:
     command = body.get("command", "")
     if command not in m.ALLOWED_COMMANDS:
-        raise HTTPException(400, f"comando não permitido: {command}")
+        raise erro(400, "command_not_allowed", f"comando não permitido: {command}")
     bloqueados = comandos_bloqueados(image, is_admin=(p.kind == "admin"))
     if command in bloqueados:
-        raise HTTPException(
+        raise erro(
             403,
+            "command_blocked",
             f"{command}: {bloqueados[command]} está bloqueado pela organização da maratona",
         )
+    # Sem `target` o padrão é a sala inteira (é contrato). O perigo é o corpo
+    # que QUIS escolher máquinas com o nome errado de campo: o nb3-api mandou
+    # `macs` por meses e um "desligue esta máquina" desligava a sala. Quem
+    # manda um desses campos sem `target` errou, e o erro tem de aparecer.
+    if "target" not in body and any(k in body for k in ("macs", "mac", "targets")):
+        raise erro(400, "no_target", 'as máquinas vão em "target": "all" ou uma lista de MACs')
     target = body.get("target", "all")
-    macs = m.list_macs(image) if target == "all" else [m.normalize_mac(x) for x in target]
+    if target != "all" and not isinstance(target, list):
+        # uma string aqui seria percorrida letra a letra
+        raise erro(400, "no_target", '"target" é "all" ou uma lista de MACs')
+    macs = m.list_macs(image) if target == "all" else [m.normalize_mac(str(x)) for x in target]
     macs = [x for x in macs if m.valid_mac(x)]
     if not macs:
-        raise HTTPException(400, "nenhuma máquina alvo")
+        raise erro(400, "no_target", "nenhuma máquina alvo")
 
-    cid = m.enqueue(image, macs, command, body.get("args", ""), int(body.get("delay", 0)))
+    cid = m.enqueue(image, macs, command, body.get("args", ""), int(body.get("delay", 0)), by=p.name or p.kind)
     # `precontest` inclui travar a tela, e a trava só dura se o SERVIDOR souber
     # dela: o agente obedece o lockstate que vem no long-poll, então o
     # ensure_locked que o comando faz na máquina seria desfeito no ciclo
@@ -345,30 +473,75 @@ async def create_command(
     return {"command_id": cid, "machines": len(macs)}
 
 
+@router.get("/site-images/{image}/commands/{command_id}")
+def command_status(
+    image: str,
+    command_id: str,
+    p=Depends(auth.require_image_access(service_scope="commands:write")),
+) -> dict:
+    """Quem executou a ordem: por máquina, `acked`, `pending` (ainda vale e
+    ninguém confirmou) ou `expired`. É a fonte da verdade; os eventos
+    `command.acked`/`command.expired` são o aviso."""
+    estado = command_log.estado(image, command_id)
+    if estado is None:
+        # também o comando de antes desta versão e o que já foi podado (7 dias)
+        raise erro(404, "command_not_found", "comando não existe (ou já saiu do registro)")
+    return estado
+
+
 async def _lock(image: str, macs: list[str], locked: bool, by: str) -> dict:
     """Trava/destrava por DOIS caminhos ao mesmo tempo: grava o estado (que a
     própria tela consulta) e enfileira o comando (que o agente executa). Se um
     falhar, o outro resolve."""
     for mac in macs:
         m.set_lock(image, mac, locked, by)
-    cid = m.enqueue(image, macs, "donottouch" if locked else "cantouch")
+    cid = m.enqueue(image, macs, "donottouch" if locked else "cantouch", by=by)
     for mac in macs:
         notify.wake_machine(image, mac)
     publicar_evento(image, "machine.locked" if locked else "machine.unlocked", {"machines": macs})
     return {"command_id": cid, "machines": len(macs), "locked": locked}
 
 
+async def _sem_lista_de_maquinas(request: Request) -> None:
+    """A rota da sede inteira não lê corpo: quem manda uma lista de máquinas
+    aqui queria travar só elas, e travava a sala toda. Foi o que o painel da
+    frota fez com seleção parcial, com a confirmação mostrando o número menor.
+    É o mesmo portão do `POST …/commands`."""
+    bruto = await request.body()
+    if not bruto.strip():
+        return
+    try:
+        corpo = json.loads(bruto)
+    except ValueError:
+        return
+    if not isinstance(corpo, dict):
+        return
+    alvo = corpo.get("target")
+    if (alvo is not None and alvo != "all") or any(
+        k in corpo for k in ("targets", "macs", "mac", "machines")
+    ):
+        raise erro(
+            400, "no_target", "esta rota trava a sede inteira; para algumas máquinas use …/machines/{mac}/lock"
+        )
+
+
 @router.post("/site-images/{image}/lock")
 async def lock_all(
-    image: str, p=Depends(auth.require_image_access(service_scope="commands:write"))
+    image: str,
+    request: Request,
+    p=Depends(auth.require_image_access(service_scope="commands:write")),
 ) -> dict:
+    await _sem_lista_de_maquinas(request)
     return await _lock(image, m.list_macs(image), True, p.name)
 
 
 @router.post("/site-images/{image}/unlock")
 async def unlock_all(
-    image: str, p=Depends(auth.require_image_access(service_scope="commands:write"))
+    image: str,
+    request: Request,
+    p=Depends(auth.require_image_access(service_scope="commands:write")),
 ) -> dict:
+    await _sem_lista_de_maquinas(request)
     return await _lock(image, m.list_macs(image), False, p.name)
 
 
@@ -402,7 +575,10 @@ async def events(image: str, request: Request, tk: str = Query("")) -> Streaming
     if p is None:
         from ..services import sessions
 
-        p = sessions.resolve(request.cookies.get(sessions.COOKIE, ""))
+        # EventSource não recebe cookie: não renova (ver auth.principal_de_link)
+        p = sessions.resolve(request.cookies.get(sessions.COOKIE, ""), renovar=False)
+    if p is not None and p.kind == "service" and not p.can_see_image(image):
+        raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
     if not p or not p.can_see_image(image):
         raise HTTPException(401, "credencial inválida")
 

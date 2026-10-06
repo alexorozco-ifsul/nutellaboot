@@ -7,7 +7,7 @@
 #                segundos com ~1 requisição por máquina a cada 25 s.
 #                (O envia.sh fazia polling a cada 5-30 s e ainda somava o
 #                atraso configurado no servidor: passava de 30 s até travar.)
-#   telemetria — envia o estado da máquina a cada ~45 s.
+#   telemetria — envia o estado da máquina a cada 40 a 59 s (jitter de propósito).
 #
 # Configuração vem de /etc/.nb3, escrito pelo stuff durante o boot.
 
@@ -59,7 +59,21 @@ nb3_detect_mac() {
     return 1
 }
 
-MAC=$(sed -n 's/.*BOOTIF=01-\([0-9a-f-]*\).*/\1/p' /proc/cmdline)
+# A chave é o MAC ESTÁVEL escolhido pelo initrd (stuff/10-identidade.sh), não
+# o da placa por onde bootou: a mesma máquina boota por cabo, wifi ou USB e
+# precisa continuar sendo a mesma máquina no painel. O BOOTIF e a detecção
+# ficam de reserva para um initrd antigo, que não grava o arquivo.
+NB3_MAC_ARQ=${NB3_MAC_ARQ:-/etc/mac-icpc}
+
+nb3_mac_do_boot() {
+    _m=$(tr -d '[:space:]' < "$NB3_MAC_ARQ" 2> /dev/null) || return 1
+    case "$_m" in
+        [0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]*) printf '%s' "$_m" ;;
+        *) return 1 ;;
+    esac
+}
+
+MAC=$(nb3_mac_do_boot) || MAC=$(sed -n 's/.*BOOTIF=01-\([0-9a-f-]*\).*/\1/p' /proc/cmdline)
 [ -n "$MAC" ] || MAC=$(nb3_detect_mac) || MAC=""
 export MAC
 
@@ -134,7 +148,10 @@ ensure_locked() {
         NB_BOOT_KEY='$NB_BOOT_KEY' \
         /usr/bin/maratona-wait --image '$IMAGEROOT' --server '$NB_SERVER' \
         --theme '${NB_LOCK_THEME:-classico}' --lang '${NB_LANGUAGE:-pt}' \
-        --fifo '$NB_UNLOCK_FIFO'" &
+        --mac '$MAC' --fifo '$NB_UNLOCK_FIFO'" 2>&1 | logger -t nb3-lock &
+    # o que a tela disser vai para o journal: o agente nasce com o stderr no
+    # /dev/null, e uma tela que morria em 1 s ficou uma semana sem explicação.
+    # A tag NÃO pode conter "maratona-wait": o pgrep -f casaria o logger.
     disown
 }
 
@@ -231,24 +248,35 @@ EDITORES_ARQ="$STATE_DIR/editores"
 EDITORES_INTERVALO=${NB_EDITORES_INTERVAL:-60}
 EDITORES_LISTA="emacs vim geany clion code pycharm idea gedit codeblocks sublime"
 
+# Uma passada da contagem (separada do laço para ser testável).
+editors_tick() {
+    abertos=$(ps -U icpc -o comm= 2> /dev/null | tr 'A-Z' 'a-z')
+    # `since` é quando a contagem começou: o resetcontaeditores apaga o
+    # arquivo e a próxima passada recomeça daqui — é o que diz "desde o
+    # precontest", sem o qual o acumulado não tem data (o MOJ viu 7.972
+    # minutos e nenhuma)
+    since=$(sed -n 's/^since=//p' "$EDITORES_ARQ" 2> /dev/null | sed -n 1p)
+    # `total` é o denominador: sem ele, "vim=142" não diz se são 142 de 150
+    # amostras ou de 1000
+    {
+        echo "since=${since:-$(date +%s)}"
+        for ed in $EDITORES_LISTA; do
+            atual=$(sed -n "s/^$ed=//p" "$EDITORES_ARQ" 2> /dev/null | sed -n 1p)
+            case "$abertos" in
+                *"$ed"*) atual=$((${atual:-0} + 1)) ;;
+                *) atual=${atual:-0} ;;
+            esac
+            [ "$atual" -gt 0 ] && echo "$ed=$atual"
+        done
+        total=$(sed -n "s/^total=//p" "$EDITORES_ARQ" 2> /dev/null | sed -n 1p)
+        echo "total=$((${total:-0} + 1))"
+    } > "$EDITORES_ARQ.tmp" && mv "$EDITORES_ARQ.tmp" "$EDITORES_ARQ"
+}
+
 editors_loop() {
     while :; do
         sleep "$EDITORES_INTERVALO"
-        abertos=$(ps -U icpc -o comm= 2> /dev/null | tr 'A-Z' 'a-z')
-        # `total` é o denominador: sem ele, "vim=142" não diz se são 142 de 150
-        # amostras ou de 1000
-        {
-            for ed in $EDITORES_LISTA; do
-                atual=$(sed -n "s/^$ed=//p" "$EDITORES_ARQ" 2> /dev/null | sed -n 1p)
-                case "$abertos" in
-                    *"$ed"*) atual=$((${atual:-0} + 1)) ;;
-                    *) atual=${atual:-0} ;;
-                esac
-                [ "$atual" -gt 0 ] && echo "$ed=$atual"
-            done
-            total=$(sed -n "s/^total=//p" "$EDITORES_ARQ" 2> /dev/null | sed -n 1p)
-            echo "total=$((${total:-0} + 1))"
-        } > "$EDITORES_ARQ.tmp" && mv "$EDITORES_ARQ.tmp" "$EDITORES_ARQ"
+        editors_tick
     done
 }
 
@@ -283,7 +311,7 @@ telemetry_loop() {
 # naquela máquina às 14h32" depois que a prova acabou.
 #
 # NÃO vai em parts.d/: aquela saída é concatenada dentro do status.json, que é
-# sobrescrito a cada 45 s. Log precisa de histórico, então tem canal próprio.
+# sobrescrito a cada ~50 s. Log precisa de histórico, então tem canal próprio.
 
 LOG_CURSOR="$STATE_DIR/journal.cursor"
 LOG_MAX_BYTES=${NB_LOG_MAX_BYTES:-524288}
@@ -354,63 +382,101 @@ send_usb_event() {
         esac
     done < "$arq"
     [ -n "$kind" ] || return 0
-    log "dispositivo USB detectado: $kind $vendor $detail"
+    log "dispositivo detectado: $kind $vendor $detail"
     curl_api "machines/$MAC/events" 15 \
         -X POST -H 'Content-Type: application/json' \
         --data "$(nb3-json --escape kind "$kind" vendor "$vendor" detail "$detail")" \
         > /dev/null
 }
 
-usb_loop() {
+# O que ja estava conectado quando o agente sobe nao e alerta. O alerta e
+# de MUDANCA de estado — alguem espetou algo durante a prova —, e o que a fila
+# tem antes do agente existir e o coldplug do boot: o udev reemite `add` para
+# todo dispositivo presente, inclusive o pendrive de boot e o leitor de
+# cartao da maquina. Uma varredura de "presente no boot" alarmava isso em
+# toda sala com pendrive espetado o dia todo, e o fiscal parava de olhar a
+# faixa vermelha.
+usb_descarta_estado_inicial() {
     mkdir -p "$USB_FILA"
-    # O que já estava conectado quando a máquina ligou: o udev não dispara
-    # "add" para isso, e ligar com o pendrive espetado é justamente o jeito
-    # mais fácil de escapar da regra.
-    #
-    # O critério era só `removable == 1`, e isso inclui LEITOR DE CD e DRIVE DE
-    # DISQUETE, vazios, em qualquer barramento: toda máquina que tem um deles
-    # alarmava "PENDRIVE CONECTADO" a cada boot, e o alerta fica na tela até um
-    # fiscal dispensar. Ter o drive não é o problema — pôr mídia nele é.
-    for dev in /sys/block/*/removable; do
-        [ -r "$dev" ] || continue
-        [ "$(cat "$dev")" = 1 ] || continue
-        nome=$(basename "$(dirname "$dev")")
-        caminho=$(readlink -f "/sys/block/$nome" 2> /dev/null || echo "")
-        modelo=$(cat "/sys/block/$nome/device/model" 2> /dev/null || echo "$nome")
-
-        case "$nome" in
-            sr* | scd*)
-                # disco óptico não alarma, nem vazio nem com mídia dentro:
-                # decisão de operação, tomada depois de o alerta aparecer em
-                # toda máquina de laboratório que tem leitor. Some o aviso E o
-                # rastro — um CD posto durante a prova deixa de virar registro.
-                continue
-                ;;
-            fd*)
-                # disquete não gera evento de troca de mídia no Linux e o
-                # tamanho é fixo com ou sem disco: não há o que detectar
-                continue
-                ;;
-        esac
-
-        # o resto só interessa se estiver pendurado no barramento USB
-        case "$caminho" in
-            */usb*) ;;
-            *) continue ;;
-        esac
-        # o pendrive de boot é o único removível esperado
-        if ! lsblk -no LABEL "/dev/$nome" 2> /dev/null | grep -q NB3CFG; then
-            printf 'kind=usb.storage\nvendor=%s\ndetail=present at boot\n' \
-                "$modelo" > "$USB_FILA/boot-$nome"
-        fi
+    for arq in "$USB_FILA"/*; do
+        [ -f "$arq" ] || continue
+        log "USB ja conectado no boot, sem alerta: $(sed -n 's/^vendor=//p' "$arq" | sed -n 1p)"
+        rm -f "$arq"
     done
+}
 
+usb_loop() {
+    usb_descarta_estado_inicial
     while :; do
         for arq in "$USB_FILA"/*; do
             [ -f "$arq" ] || continue
             send_usb_event "$arq" && rm -f "$arq"
         done
         sleep 1
+    done
+}
+
+# --- monitores ---------------------------------------------------------------
+#
+# Na prova, normalmente um monitor só (campo "Monitores permitidos",
+# NB_MAX_MONITORS no /etc/.nb3; 0 = sem limite). Acima disso vira alerta pela
+# mesma fila dos dispositivos USB. Diferente do pendrive, vale também o que já
+# estava ligado no boot: a exceção do boot existe por causa do pendrive de boot
+# espetado, e um segundo monitor já ligado é justamente o que se quer pegar.
+NB3_SYSFS_DRM=${NB3_SYSFS_DRM:-/sys/class/drm}
+MONITORES_ARQ="$STATE_DIR/monitores"
+
+# Os monitores ACESOS: conectados E com saída ativa. Só `status` daria dois
+# falsos alarmes: notebook com a tampa fechada num monitor externo (o eDP
+# continua "connected", apagado) e o conector Writeback ("unknown"). Ler o
+# `status` no sysfs devolve o estado em cache, não sonda a porta.
+monitores_ativos() {
+    for _c in "$NB3_SYSFS_DRM"/card*-*; do
+        [ "$(cat "$_c/status" 2> /dev/null)" = connected ] || continue
+        [ "$(cat "$_c/enabled" 2> /dev/null)" = enabled ] || continue
+        _n=${_c##*/}
+        printf '%s\n' "${_n#card*-}"
+    done
+}
+
+# Uma passada (separada do laço para ser testável). Duas passadas seguidas
+# acima do limite antes de avisar: na subida da sessão, e no notebook que
+# acabou de ser acoplado, os dois painéis ficam acesos por um instante.
+monitores_tick() {
+    _lim=${NB_MAX_MONITORS:-1}
+    case "$_lim" in '' | *[!0-9]*) _lim=1 ;; esac
+    [ "$_lim" -eq 0 ] && return 0
+    _lista=$(monitores_ativos)
+    _qtd=$(printf '%s' "$_lista" | grep -c .)
+    _acima=$(sed -n 's/^acima=//p' "$MONITORES_ARQ" 2> /dev/null | sed -n 1p)
+    _avisado=$(sed -n 's/^avisado=//p' "$MONITORES_ARQ" 2> /dev/null | sed -n 1p)
+    if [ "$_qtd" -gt "$_lim" ]; then
+        _acima=$((${_acima:-0} + 1))
+        if [ "$_acima" -ge 2 ] && [ "${_avisado:-0}" != 1 ]; then
+            mkdir -p "$USB_FILA"
+            _arq="$USB_FILA/$(date +%s)-monitores-$RANDOM"
+            {
+                echo "kind=display.multiple"
+                echo "vendor="
+                echo "detail=$_qtd monitores: $(printf '%s' "$_lista" | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
+            } > "$_arq.tmp" && mv "$_arq.tmp" "$_arq"
+            log "mais monitores que o permitido ($_qtd > $_lim): $(printf '%s' "$_lista" | tr '\n' ' ')"
+            _avisado=1
+        fi
+    else
+        _acima=0
+        _avisado=0
+    fi
+    printf 'acima=%s\navisado=%s\n' "$_acima" "${_avisado:-0}" > "$MONITORES_ARQ"
+}
+
+monitores_loop() {
+    # começa depois do descarte da fila no boot (usb_loop), e o debounce de
+    # duas passadas garante que nenhum aviso chega antes dele
+    rm -f "$MONITORES_ARQ"
+    while :; do
+        sleep 5
+        monitores_tick
     done
 }
 
@@ -433,6 +499,7 @@ setup_unlock_fifo && unlock_listener &
 telemetry_loop &
 logs_loop &
 usb_loop &
+monitores_loop &
 editors_loop &
 lock_watchdog &
 commands_loop

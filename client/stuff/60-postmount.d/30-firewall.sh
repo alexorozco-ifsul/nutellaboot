@@ -1,20 +1,27 @@
 # shellcheck shell=sh
 # Firewall da maratona + desligamento de serviços que atrapalham a prova.
 nb3_post_firewall() {
-    log_begin_msg "Configuring the firewall"
-    # A base publicada filtra o /etc/hosts com egrep por SUBSTRING sem âncora:
-    # o hosts/maratona (escrito no fim desta função) apagava qualquer linha
-    # contendo "maratona" — inclusive entradas legítimas do whitelist gravadas
-    # pelas iterações anteriores. Enquanto a base não for reconstruída com o
-    # pacote corrigido, o script entra aqui por inteiro (idêntico ao commit do
-    # maratona-firewall); quando ela vier sem o padrão defeituoso, isto vira
-    # no-op sozinho.
+    # O maratona-firewall vem assado na camada base, e o filtro do /etc/hosts
+    # dele estava errado de três jeitos, um por versão:
+    #  - egrep por SUBSTRING sem âncora (20230113): o hosts/maratona apagava
+    #    toda linha com "maratona", inclusive entradas do allowlist;
+    #  - a mesma regex com grep --invert-match (20240530, a base publicada);
+    #  - o awk por campo que ainda descartava pelo IP: dois nomes atrás do
+    #    mesmo proxy (moj e nutellaboot de uma sede) se apagavam.
+    # A primeira troca daqui só reconhecia o egrep e nunca disparou na base
+    # publicada. Enquanto a base não vier com o pacote corrigido, o script
+    # entra aqui por inteiro, idêntico ao maratona-firewall-configuration.sh
+    # do pacote (commit "Match /etc/hosts entries by whole field, and keep
+    # names sharing an IP"); com a base corrigida, isto vira no-op sozinho.
+    # O texto abaixo não pode conter nenhum dos três padrões do gatilho.
+    #
+    # A troca vale em todo boot até a base ser reconstruída: vai na própria
+    # linha do firewall, não num aviso, que a sala leria como defeito.
     _fwsh="${rootmnt?}/usr/share/maratona-firewall/maratona-firewall-configuration.sh"
-    if [ -f "$_fwsh" ] && ! grep -q 'nb3-hosts-fix-v2' "$_fwsh"; then
-        nb_warn "patching maratona-firewall /etc/hosts filter (base image)"
+    if [ -f "$_fwsh" ] && grep -qF -e 'egrep -v' -e '--invert-match' -e '$1 == ip { next }' "$_fwsh"; then
+        log_begin_msg "Configuring the firewall (with the /etc/hosts filter fix)"
         cat > "$_fwsh" << 'NB3FWEOF'
 #!/bin/bash
-# nb3-hosts-fix-v2
 
 # Reset no ufw - apaga tudo e volta para o padrao
 ufw -f reset
@@ -38,34 +45,38 @@ for LATAMHOST in /usr/share/maratona-firewall/hosts/* /etc/maratona-firewall/hos
   if [[ ! -e "$LATAMHOST" ]]; then
     continue;
   fi
-  HOSTNAME="$(basename $LATAMHOST)"
+  HOSTNAME="$(basename "$LATAMHOST")"
   echo "Enabling $HOSTNAME"
-  for IP in $(< $LATAMHOST); do
-    ufw allow out proto udp to $IP
-    ufw allow out proto tcp to $IP
+  for IP in $(< "$LATAMHOST"); do
+    ufw allow out proto udp to "$IP"
+    ufw allow out proto tcp to "$IP"
   done
 
-  # Only the first IP in the file will have an entry in /etc/hosts
-  IP="$(head -n1 $LATAMHOST)"
+  # Only the first IP in the file will have an entry in /etc/hosts.
+  # Compare whole fields, never substrings: a regex built from the name and
+  # the IP wiped every line containing them (the file named "maratona" took
+  # any allowlist entry with that word, and unescaped dots matched other
+  # addresses). Dropping by IP made two names behind the same proxy erase
+  # each other, so only this name's old line goes. The exception is
+  # 127.0.1.1, the machine's own name: there the old line (the hostname of
+  # the machine that built the image) goes by address too.
+  IP="$(head -n1 "$LATAMHOST")"
   TMPFILE=$(mktemp)
-  # Compare whole fields, never substrings: the hostname used to be dropped
-  # into an unanchored egrep ERE, so a file named "maratona" wiped every line
-  # containing that word - including allowlist entries written by previous
-  # loop iterations. Unescaped dots in $IP had the same problem.
-  awk -v host="$HOSTNAME" '
+  awk -v ip="$IP" -v host="$HOSTNAME" '
     /^[[:space:]]*#/ { print; next }
+    $1 == ip && ip == "127.0.1.1" { next }
     { for (i = 2; i <= NF; i++) if ($i == host) next }
     { print }
-  ' /etc/hosts > $TMPFILE
-  printf '%s\t%s\n' "$IP" "$HOSTNAME" | cat $TMPFILE - > /etc/hosts
-  rm $TMPFILE
+  ' /etc/hosts > "$TMPFILE"
+  printf '%s\t%s\n' "$IP" "$HOSTNAME" | cat "$TMPFILE" - > /etc/hosts
+  rm "$TMPFILE"
 done
 
 # configurações para UFW específicas
 
 for MLUFW in /etc/maratona-firewall/ufwrules/*; do
   [[ ! -e "$MLUFW" ]] && continue
-  . $MLUFW
+  . "$MLUFW"
 done
 
 # Rejeitando os pacotes udp e tcp para qualquer ip
@@ -75,6 +86,8 @@ ufw reject out proto tcp to any
 exit 0
 NB3FWEOF
         chmod 755 "$_fwsh"
+    else
+        log_begin_msg "Configuring the firewall"
     fi
 
     if [ -n "$FIREWALL_ALLOWLIST" ]; then
@@ -102,12 +115,11 @@ NB3FWEOF
         done
         IFS=$_old_ifs
     fi
-    # O pacote maratona-firewall traz hosts/nutellaboot.naquadah.com.br fixo:
-    # o servidor da organizacao da Maratona. Numa sede que roda o proprio
-    # NutellaBoot isso e saida liberada no ufw e uma entrada em /etc/hosts para
-    # um endereco que ninguem usa — e, quando divide IP com outro nome, entra
-    # na disputa do laco que monta o /etc/hosts. So sai se o servidor DESTA
-    # instalacao for outro, para nao quebrar quem de fato usa o oficial.
+    # [ifsul] O pacote maratona-firewall traz hosts/nutellaboot.naquadah.com.br
+    # fixo: o servidor da organização da Maratona. Numa sede que roda o próprio
+    # NutellaBoot isso é saída liberada no ufw e uma entrada em /etc/hosts para
+    # um endereço que ninguém usa. Só sai se o servidor DESTA instalação for
+    # outro, para não quebrar quem de fato usa o oficial.
     case "${NB_SERVER:-}" in
         *naquadah.com.br*) : ;;
         *) rm -f "${rootmnt?}/usr/share/maratona-firewall/hosts/nutellaboot.naquadah.com.br" ;;

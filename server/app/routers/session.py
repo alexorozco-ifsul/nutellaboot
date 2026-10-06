@@ -16,21 +16,6 @@ from ..services import ownership, ratelimit, sessions
 router = APIRouter(prefix="/api/v1")
 
 
-def _set_cookie(resp: Response, sid: str) -> None:
-    resp.set_cookie(
-        sessions.COOKIE,
-        sid,
-        max_age=sessions.DURACAO,
-        httponly=True,
-        # quem termina TLS é o nginx; o backend só fala HTTP no loopback
-        secure=True,
-        # o console não é linkado de fora, então Strict não custa nada e já
-        # barra requisição vinda de outro site
-        samesite="strict",
-        path="/",
-    )
-
-
 @router.post("/session")
 async def login(body: dict, request: Request, response: Response) -> dict:
     """Troca a chave por um cookie de sessão."""
@@ -38,15 +23,17 @@ async def login(body: dict, request: Request, response: Response) -> dict:
     ip = ratelimit.client_ip(request)
 
     p = auth.identify(chave) if chave else None
+    if p is not None and p.kind == "service":
+        # chave válida, porta errada: não é tentativa de adivinhar código
+        raise auth.recusa_de_console(p)
     if p is None or p.kind not in sessions.TIPOS:
         # mesmo limitador da autenticação por cabeçalho: um código de convite é
         # curto o bastante para ser tentado na força bruta
-        if not ratelimit.allow(f"console:{ip}", rate=0.2, burst=10):
-            raise HTTPException(429, "muitas tentativas; tente de novo em instantes")
+        ratelimit.exigir(f"console:{ip}", rate=0.2, burst=10)
         raise HTTPException(401, "chave ou código inválido")
 
-    sessao = sessions.create(p.kind, p.name, ip=ip)
-    _set_cookie(response, sessao["id"])
+    sessao = sessions.create(p.kind, p.name, ip=ip, key_fp=p.key_fp)
+    sessions.set_cookie(response, sessao["id"])
     return {"ok": True, "expires_at": sessao["expires_at"], **ownership.whoami(p)}
 
 
@@ -67,9 +54,11 @@ def _sid(request: Request) -> str:
 async def current(request: Request) -> dict:
     """Quem está logado nesta sessão e até quando."""
     sid = _sid(request)
-    registro = sessions.get(sid)
-    p = sessions.resolve(sid) if registro else None
-    if p is None:
+    # resolver ANTES de ler o registro: se esta requisição renovou a sessão,
+    # o expires_at que volta já é o novo
+    p = sessions.resolve(sid)
+    registro = sessions.get(sid) if p else None
+    if p is None or registro is None:
         raise HTTPException(401, "sem sessão")
     return {
         "expires_at": registro["expires_at"],

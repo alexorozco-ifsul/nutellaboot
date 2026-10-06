@@ -23,11 +23,13 @@ DINAMICOS: dict[str, set[str]] = {}
 
 def paginas() -> list[tuple[Path, Path]]:
     """(html, js) de cada tela. A home é web/index.html + web/index.js; as
-    demais são web/<tela>/index.html + web/<tela>/app.js."""
+    demais são web/<tela>/index.html + CADA .js de web/<tela>/ (as telas
+    grandes são divididas em módulos, e um id procurado num módulo que não
+    fosse conferido voltaria a ser a tela em branco sem erro)."""
     out = [(WEB / "index.html", WEB / "index.js")]
     for d in sorted(WEB.iterdir()):
         if (d / "index.html").is_file() and (d / "app.js").is_file():
-            out.append((d / "index.html", d / "app.js"))
+            out += [(d / "index.html", js) for js in sorted(d.glob("*.js"))]
     return out
 
 
@@ -43,17 +45,19 @@ def ids_procurados(js: Path) -> set[str]:
     return achados
 
 
-@pytest.mark.parametrize("html,js", paginas(), ids=lambda p: p.parent.name or p.name)
+@pytest.mark.parametrize("html,js", paginas(), ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_ids_do_js_existem_no_html(html, js):
     faltando = ids_procurados(js) - ids_no_html(html) - DINAMICOS.get(html.parent.name, set())
     assert faltando == set(), f"{js.relative_to(REPO)} procura ids que {html.name} não tem: {sorted(faltando)}"
 
 
-def test_console_tem_os_elementos_da_secao_de_modelos():
-    """A seção de Modelos é a novidade do console; se algum campo sumir, a
-    criação de modelo para de funcionar sem erro na tela."""
-    ids = ids_no_html(WEB / "admin" / "index.html")
-    assert {"mod_name", "mod_desc", "mod_from", "mod_create", "modlist", "modpanel"} <= ids
+def test_o_console_cria_modelo_com_nome_descricao_e_origem():
+    """Criar e duplicar modelo são o mesmo diálogo; se um campo sumir do
+    corpo, a criação para de copiar camadas e formulário sem erro na tela."""
+    js = (WEB / "admin" / "modelo.js").read_text(encoding="utf-8")
+    trecho = js.split('api.post("/api/v1/models"', 1)[1].split(")", 1)[0]
+    for campo in ("name:", "description:", "from:"):
+        assert campo in trecho, campo
 
 
 def test_painel_do_laboratorio_tem_a_faixa_de_alerta():
@@ -88,13 +92,45 @@ def test_alerta_chega_sem_esperar_o_agrupamento():
     assert 'addEventListener("alert.raised"' in app
 
 
-@pytest.mark.parametrize("secao", ["invites", "requests_admin", "publish_section", "bulk"])
-def test_console_marca_o_que_e_so_da_administracao(secao):
-    """Sub-admin não pode ver convites, pedidos, publicação nem criação em
-    massa — o JS esconde pelo atributo, então ele precisa estar no cartão."""
+@pytest.mark.parametrize(
+    "aba,so_admin",
+    [("imagens", False), ("modelos", False), ("camadas", False), ("pessoas", True), ("chaves", True), ("sistema", True)],
+)
+def test_console_marca_o_que_e_so_da_administracao(aba, so_admin):
+    """Sub-admin não vê convites, pedidos, chaves, publicação nem auditoria: a
+    aba some (data-admin-only) E o roteador não a abre (`admin: true`), para o
+    endereço digitado à mão também voltar à aba padrão."""
     html = (WEB / "admin" / "index.html").read_text(encoding="utf-8")
-    # do último <div class="card... antes do título até o título: é a abertura
-    # do cartão que contém esta seção
-    antes = html.split(f'<h2 data-i18n="{secao}">', 1)[0]
-    abertura = antes.rsplit("<div class=", 1)[-1]
-    assert "data-admin-only" in abertura, f"o cartão de {secao} precisa de data-admin-only"
+    link = re.search(rf'<a href="#{aba}"[^>]*>', html)
+    assert link, f"a aba {aba} sumiu"
+    assert ("data-admin-only" in link.group(0)) is so_admin
+    rotas = (WEB / "admin" / "rotas.js").read_text(encoding="utf-8")
+    assert re.search(rf"\b{aba}: \{{ admin: {'true' if so_admin else 'false'},", rotas), aba
+    assert "ROTAS[aba].admin" in rotas, "o roteador tem de consultar a marca"
+
+
+def _imports(js: Path) -> list[str]:
+    return re.findall(r'''^\s*import\s[^;]*?from\s+["\']([^"\']+)["\']''', js.read_text(encoding="utf-8"), re.M)
+
+
+def test_modulos_importados_existem():
+    """Import de módulo que não existe é tela em branco, sem erro para quem
+    opera: o navegador nem começa a rodar o app.js."""
+    ruins = []
+    for js in WEB.rglob("*.js"):
+        for alvo in _imports(js):
+            caminho = WEB / alvo.lstrip("/") if alvo.startswith("/") else (js.parent / alvo)
+            if not caminho.resolve().is_file():
+                ruins.append(f"{js.relative_to(WEB)} importa {alvo}")
+    assert ruins == []
+
+
+def test_nenhum_import_default():
+    """O no-undef caseiro (test_web_js) só entende `import { a, b }` e
+    `import * as x`: um `import x from` passaria batido e esconderia erro."""
+    ruins = []
+    for js in WEB.rglob("*.js"):
+        for linha in js.read_text(encoding="utf-8").splitlines():
+            if re.match(r"\s*import\s+[A-Za-z_$][\w$]*\s*(,|from)", linha):
+                ruins.append(f"{js.relative_to(WEB)}: {linha.strip()}")
+    assert ruins == []

@@ -2,6 +2,7 @@
 import * as api from "/common/api.js";
 import { init, t, tr, apply } from "/common/i18n.js";
 import { usbBlock } from "/common/usb.js";
+import { esc } from "/common/ui.js";
 
 const $ = (sel) => document.querySelector(sel);
 let schema = null;
@@ -70,7 +71,8 @@ function renderSelect(field, locked) {
   for (const opt of field.options || []) {
     const o = document.createElement("option");
     o.value = opt.value;
-    o.textContent = opt.label;
+    // o rótulo da opção pode ser {pt,en,es} ("sem limite"): cru, sairia [object Object]
+    o.textContent = tr(opt.label) || opt.value;
     o.selected = String(values[field.key]) === String(opt.value);
     sel.appendChild(o);
   }
@@ -335,7 +337,7 @@ async function main() {
     // sem o refresh o operador nunca a veria sumir
     setInterval(loadSeeders, 10000);
   } catch (e) {
-    $("#form").innerHTML = `<p class="muted">${e.status === 401 ? t("no_token") : e.message}</p>`;
+    $("#form").innerHTML = `<p class="muted">${esc(e.status === 401 ? t("no_token") : e.message)}</p>`;
     return;
   }
 

@@ -11,6 +11,13 @@ Há ainda a documentação interativa gerada automaticamente em
 **`/api/v1/docs`** (OpenAPI navegável, com formulário para testar cada rota) e
 o esquema cru em `/api/v1/openapi.json`.
 
+As respostas que um integrador lê têm **formato publicado** no OpenAPI
+(máquina, ponto e janela de sample, vínculo, roster, webhook, comando, whoami, o
+corpo de erro e, na seção `webhooks`, o evento que o servidor envia). Todo
+esquema é aberto (`additionalProperties: true`) e todo campo é opcional: a
+frota é mista e um campo novo nosso não pode quebrar o validador de um cliente.
+Valide o que você lê, ignore o que não conhece.
+
 ## Credenciais
 
 | Classe | Prefixo | Como enviar |
@@ -36,11 +43,15 @@ navegador cuida do resto — recarregar a página não pede nada de novo.
 | Método | Caminho | Corpo | Resposta |
 |---|---|---|---|
 | POST | `/api/v1/session` | `{key}` | `Set-Cookie: nb3_session=…` + o mesmo corpo do `whoami` |
-| GET | `/api/v1/session` | — | quem está logado, quando expira e as outras sessões desta identidade |
+| GET | `/api/v1/session` | — | quem está logado, quando expira (já renovado, se esta requisição renovou) e as outras sessões desta identidade |
 | DELETE | `/api/v1/session[?all=true]` | — | encerra esta sessão (ou todas as da identidade) |
 
 O cookie é `HttpOnly` (nenhum script da página o lê), `Secure`,
-`SameSite=Strict` e vale **30 dias**.
+`SameSite=Strict` e vale **30 dias a partir do último uso**: uma requisição
+de console feita mais de 24 h depois da última renovação estende o prazo e
+reemite o cookie (`Set-Cookie` na própria resposta); `sessions.json` é
+reescrito no máximo uma vez por dia por sessão. Só requisição de console
+renova — `<img>`, `<a download>` e `EventSource` não recebem cookie de volta.
 
 **Requisição autenticada por cookie precisa do cabeçalho `X-NB-Console: 1`.**
 É o que impede CSRF: um `<form>` de outro site consegue fazer o navegador
@@ -68,6 +79,12 @@ token da site-image, **M** chave de máquina, **B** chave de boot, **—** abert
 > **401**, exista a imagem ou não; com credencial de outro dono, **404**.
 > A chave de **serviço** é a exceção: como é a administração que a emite, ela
 > recebe 403 de escopo ou de glob, que é o erro útil para quem integra.
+>
+> **401 × 403 para a chave de serviço.** `401` é só para credencial que não
+> vale (ausente, errada, revogada). Uma chave de serviço **válida** que bate
+> numa rota do console recebe `403` com `code: "console_only"`; sem o escopo,
+> `insufficient_scope`; fora do glob, `image_out_of_scope`. Ela também não
+> gasta o limitador de tentativas do console.
 
 ---
 
@@ -86,12 +103,6 @@ mandar a chave no corpo; `aria2c` e `curl` usam o cabeçalho.
 | POST | `/boot/v3/{img}/seeders/join?ip=…` | B | `stuff` | `accepted=t\|f` + `seeders=N` |
 | POST | `/boot/v3/{img}/seeders/heartbeat?ip=…` | B | `stuff` (a cada 60 s) | `released=t\|f` + `seeders=N` |
 | POST | `/boot/v3/{img}/seeders/leave?ip=…` | — | `stuff` | `ok` |
-
-O join respeita o limite `SEEDMAX` da configuração da imagem (padrão 4):
-pool cheio responde **200 com `accepted=f`** — não é erro, a máquina só pula
-a semeadura e boota direto. `released=t` no heartbeat avisa que o console
-liberou a máquina: ela sai do modo seed, chama `leave` e termina o boot.
-Tudo em texto puro `chave=valor`, como o resto do `/boot/v3`.
 | GET/POST | `/boot/v3/{img}/wallpaper` | B | `stuff` | PNG/JPEG, com `ETag` = md5 |
 | GET/POST | `/boot/v3/{img}/clionkey` | B | `stuff` | a licença do CLion (404 se não instalada no servidor) |
 | GET/POST | `/boot/v3/{img}/lockinfo/{mac}` | B | tela de bloqueio | JSON com time, organização, país e lugar |
@@ -99,6 +110,12 @@ Tudo em texto puro `chave=valor`, como o resto do `/boot/v3`.
 | GET/POST | `/boot/v3/{img}/roster/logos/{org}` | B | tela de bloqueio | SVG ou PNG do logotipo |
 | GET/POST | `/boot/v3/{img}/usb` | B | `stuff` | `BUILD <id>` e, nas linhas seguintes, `MD5 ARQUIVO URL` (mesmo formato do manifest) |
 | GET/POST | `/boot/v3/{img}/usbfile/{nome}` | B | `stuff` | o `vmlinuz` ou o `initrd.img` da construção atual |
+
+O join respeita o limite `SEEDMAX` da configuração da imagem (padrão 4):
+pool cheio responde **200 com `accepted=f`** — não é erro, a máquina só pula
+a semeadura e boota direto. `released=t` no heartbeat avisa que o console
+liberou a máquina: ela sai do modo seed, chama `leave` e termina o boot.
+Tudo em texto puro `chave=valor`, como o resto do `/boot/v3`.
 
 `/usb` é como a máquina descobre que o pendrive de onde ela bootou está para
 trás: o initrd carrega o próprio carimbo em `/etc/nutellaboot-build`, compara,
@@ -111,7 +128,7 @@ aí a máquina não confere nada. `{nome}` sai de uma lista fechada
 
 ```
 $ curl -s -H "X-NB-Boot-Key: $BOOT_KEY" \
-    https://nutellaboot.naquadah.com.br/boot/v3/25brbr/manifest
+    https://nutellaboot.mdp.naquadah.com.br/boot/v3/25brbr/manifest
 60782353ebd1898ab5d5f7a86c9efc34 firefox.squash https://files.mdp.naquadah.com.br/maratonalinux/firefox.squash
 2c02aa5ea909e9f74ce47ea7d3a84b4d wifis.squash http://files.mdp.naquadah.com.br/maratonalinux/wifis.squash
 fbd0543ae7c9181ac029192e3c7d087e log23.squash http://files.mdp.naquadah.com.br/maratonalinux/log23.squash
@@ -141,7 +158,7 @@ O cliente lê com `while read MD5 ARQUIVO URLS` e passa `$URLS` inteiro ao
     "name": "Universidade de Brasília",
     "logo_url": "/boot/v3/25brbr/roster/logos/unb"
   },
-  "country": "BRA"
+  "country": "BR"
 }
 ```
 
@@ -154,7 +171,7 @@ O cliente lê com `while read MD5 ARQUIVO URLS` e passa `$URLS` inteiro ao
 
 NBUID=866112933
 IMAGEROOT='25brbr'
-NB_SERVER='https://nutellaboot.naquadah.com.br'
+NB_SERVER='https://nutellaboot.mdp.naquadah.com.br'
 NB_MACHINE_KEY='nb3m_…'
 NB_BOOT_KEY='nb3b_…'
 ALLOWNETWORKCHANGE='f'
@@ -177,16 +194,30 @@ ALLOWNETWORKCHANGE='f'
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
-| POST | `/api/v1/site-images` | C | `{id, fullname, model, unlocked?, wallpaper_locked?}` | imagem criada **com as credenciais em claro** (única vez) |
+| POST | `/api/v1/site-images` | C | `{id, fullname, model, unlocked?, wallpaper_locked?, dashboard_hidden?, country?}` (`dashboard_hidden` só a administração; `country` é ISO alpha-2). Para o sub-admin o convite decide: `unlocked: true` só se o convite for Livre, e `wallpaper_locked` é o do convite (valor diferente: **403**); a imagem herda o `build_quota` do convite | imagem criada **com as credenciais em claro** (única vez) |
 | POST | `/api/v1/site-images/bulk` | A | TSV ou `{rows:[…]}` | `{results:[…]}`; com `?format=csv`, CSV das credenciais |
-| GET | `/api/v1/site-images?prefix=` | C | — | `{images:[…]}` (o sub-admin vê só as dele) |
-| GET | `/api/v1/site-images/{img}` | C, I | — | `image.json` |
-| PATCH | `/api/v1/site-images/{img}` | C | `{fullname?, unlocked?, model?, wallpaper_locked?}` | imagem atualizada |
-| DELETE | `/api/v1/site-images/{img}` | C | — | `204` |
+| GET | `/api/v1/site-images?prefix=` | C, S (qualquer escopo) | — | `{images:[…]}` (o sub-admin vê só as dele). Para a chave de serviço: só as imagens do glob, como `{id, fullname, country?, machines_total}` |
+| GET | `/api/v1/site-images/{img}` | C, I, S (qualquer escopo, dentro do glob) | — | `image.json` **sem o `owner` cru** para quem não é o console dono (ver abaixo); sempre com `owner_kind`, `owner_label`, `owner_ref` |
+| PATCH | `/api/v1/site-images/{img}` | C | `{fullname?, unlocked?, model?, wallpaper_locked?, dashboard_hidden?}` | imagem atualizada |
+| DELETE | `/api/v1/site-images/{img}` | C | — | `204` (apaga também o pendrive gerado em `data/usb/` e o estado de publicação) |
 | POST | `/api/v1/site-images/{img}/token/rotate` | C | — | `{token}` |
 | GET | `/api/v1/site-images/{img}/credentials` | C | — | token, chaves e links prontos |
 | GET | `/api/v1/site-images/{img}/boot-key` | C | — | `{boot_key}` |
 | POST | `/api/v1/site-images/{img}/boot-key/rotate` | C | — | `{boot_key}` (exige atualizar os pendrives) |
+| POST | `/api/v1/site-images/{img}/machine-key/rotate` | C | `{grace_hours?: 0 a 72 (padrão 12), force?}` | `{machine_key, previous_valid_until, online, locked}`. A máquina só recebe a chave no boot: na carência a antiga continua valendo. `grace_hours: 0` com máquina travada é `409`, salvo `force` |
+
+> **O dono de uma imagem e o código do convite.** O id do dono de um sub-admin é
+> `invite:<CÓDIGO>`, e o código é a credencial de console dele. Por isso o
+> `owner` cru só é devolvido à administração e ao próprio dono. Para o token da
+> sede, a chave de serviço e outro sub-admin (num modelo público), a resposta
+> traz `owner_kind` (`admin` ou `subadmin`), `owner_label` (o rótulo do convite)
+> e `owner_ref` (uma referência curta, que não se reverte ao código). Vale
+> também para `GET /api/v1/models` e `GET /api/v1/models/{nome}`.
+
+`dashboard_hidden` (só a administração muda) tira a imagem das visões da frota
+(`/labs`, `/labs/inventory`, `/labs/series`): é para a imagem de teste dos
+times, que não pode inflar o placar nem o perfil de hardware. Ela continua
+existindo em tudo o mais (hotconfig, configureitor, relatório).
 
 Identificadores começando com dígito ficam no espaço reservado à
 administração (`namespace: "contest"`); os demais são `personal`. O `id` aceita
@@ -227,15 +258,15 @@ telemetria, wifi, pacotes) e o formulário que cada sede preenche
 | POST | `/api/v1/models` | C | `{name, description?, public?, from?}` | modelo criado |
 | POST | `/api/v1/models/{n}/duplicate` | C | `{name, description?}` | cópia com as mesmas camadas e o mesmo formulário |
 | GET | `/api/v1/models` | C | — | `{models:[{name, description, public, owner, mine, layers, used_by, can_manage}]}` |
-| GET | `/api/v1/models/{n}` | C | — | `model.json` + `schema` |
+| GET | `/api/v1/models/{n}` | C | — | `model.json` + `schema` + `can_manage`, `mine` e `image_extras:[{id, fullname, unlocked, layers:[{file, md5, role, from_build}]}]` (as imagens deste modelo que quem pergunta enxerga, com as camadas só delas) e `wallpaper` (a meta do papel de parede do modelo, ou `null`) |
 | PATCH | `/api/v1/models/{n}` | C | `{public?, description?}` | modelo atualizado (só **A** publica) |
 | DELETE | `/api/v1/models/{n}` | C | — | `204`; **409** se alguma site-image ainda deriva dele |
 | POST | `/api/v1/models/{n}/layers` | C | `{file, md5, cdn_url?, size?, position?, role?, replace_role?}` | `{layers:[…]}` |
 | DELETE | `/api/v1/models/{n}/layers/{file}` | C | — | `{layers:[…]}` |
 | PUT | `/api/v1/models/{n}/layers/order` | C | `{files:[…]}` | `{layers:[…]}` |
 | PUT | `/api/v1/models/{n}/layers` | C | `{layers:[…]}` | substitui a lista inteira (prefira o `POST`: uma leitura desatualizada aqui apaga o que outro acabou de acrescentar) |
-| GET | `/api/v1/layers/catalog` | C | — | camadas já em uso, com `used_by` |
-| GET | `/api/v1/models/{n}/schema` | C | — | campos com `default`, `label`, `help` e `locked` |
+| GET | `/api/v1/layers/catalog` | C | — | camadas já em uso, com `used_by`, e as construções prontas visíveis a quem pergunta (`build:{id, name, model, finished_at}`, `available`) |
+| GET | `/api/v1/models/{n}/schema` | C | — | campos com `default`, `label`, `help`, `options` e `locked`; campo de senha traz `has_default` |
 | PUT | `/api/v1/models/{n}/schema/locks` | C | `{locks:{CAMPO:true|false}}` | schema atualizado |
 | PATCH | `/api/v1/models/{n}/schema/fields/{key}` | C | `{default?, locked?, label?, help?}` | schema atualizado |
 
@@ -258,6 +289,13 @@ Notas que economizam depuração:
 - `PATCH …/schema/fields/{key}` ajusta um campo existente. Não cria campos:
   variável nova só teria efeito se algum módulo do `stuff` a lesse, o que é
   mudança de cliente. `label` e `help` exigem os três idiomas.
+- O padrão de um campo de senha (`ROOT_PASSWORD`, `LOCK_FALLBACK_PASSWORD`) é
+  guardado como hash e **não sai pela API**: nem no `schema` de
+  `GET /models/{n}` e das escritas que devolvem o modelo, nem no de
+  `GET /config`, nem no `GET …/schema`. No lugar vem `has_default: true|false`.
+  Só o `stuff` da sede recebe o hash (`NB_ROOT_PW_HASH`). O hash de root é um
+  `$6$` da senha que a organização escolheu: com ele, o token de uma sede
+  quebrava a senha offline.
 - Modelo sem camada nenhuma gera uma site-image que **não boota**; a criação
   devolve `warning` avisando disso.
 - Só a administração marca um modelo como `public`. Modelo público é visível
@@ -269,8 +307,8 @@ Notas que economizam depuração:
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
-| GET | `/api/v1/whoami` | C | — | `{kind, label, owner, can_create_reserved, can_publish_models, can_manage_invites, quotas, usage}` |
-| GET | `/api/v1/owners` | A | — | `{owners:[{id, label, quotas, usage, console_ok}]}` |
+| GET | `/api/v1/whoami` | C, S (qualquer escopo) | — | console: `{kind, label, owner, can_create_reserved, can_publish_models, can_manage_invites, quotas, usage:{models, site_images, builds}}`, e para o sub-admin `invite_profile:{unlocked, wallpaper_locked}`; chave de serviço: `{kind:"service", name, label, scopes, image_globs, images}` |
+| GET | `/api/v1/owners` | A | — | `{owners:[{id, owner_ref, label, quotas, usage, console_ok}]}` |
 | POST | `/api/v1/owners/{id}/disable` | A | `{disabled?: true}` | suspende (ou reativa) o console |
 | PATCH | `/api/v1/owners/{id}/quotas` | A | `{max_models?, max_images?, build_quota?}` | `{id, quotas, usage}` |
 
@@ -278,8 +316,9 @@ Notas que economizam depuração:
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
-| GET | `/api/v1/invites` | A | — | `{invites:[…]}` |
+| GET | `/api/v1/invites` | A | — | `{invites:[{code, owner_ref, …}]}`: o `owner_ref` junta o convite ao sub-admin (e às imagens dele) sem repetir o código |
 | POST | `/api/v1/invites` | A | `{label?, note?, model?, count?, max_images?, max_models?, build_quota?, expires_at?, unlocked?, wallpaper_locked?}` | `{invites:[…]}` — **com os códigos**; `count` emite vários de uma vez |
+| PATCH | `/api/v1/invites/{code}` | A | qualquer de `{label, note, max_images, max_models, build_quota, expires_at, revoked, unlocked, wallpaper_locked, model}` | o convite atualizado. `revoked: true` fecha o console e a criação **sem destruir nada** (o dono dos objetos fica) e volta atrás com `false` |
 | DELETE | `/api/v1/invites/{code}` | A | — | **409** listando o que ficaria órfão; `?force=true` apaga assim mesmo |
 
 `unlocked` no convite escolhe o perfil da imagem que ele vai criar: **Livre**
@@ -319,7 +358,7 @@ Do outro lado, a administração despacha os pedidos:
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
 | GET | `/api/v1/requests` | A | — | `{requests:[…]}` |
-| POST | `/api/v1/requests/{rid}/approve` | A | `{action:"issue_code"\|"create", model?, max_images?, build_quota?, unlocked?}` | o código emitido, ou a imagem já criada com as credenciais |
+| POST | `/api/v1/requests/{rid}/approve` | A | `{action:"issue_code"\|"create", …}`: com `issue_code`, os mesmos campos do `POST /invites` (`max_images` padrão 1, rótulo do pedido); com `create`, `{id, fullname?, model, unlocked?, build_quota?}` | o código emitido, ou a imagem já criada com as credenciais |
 | POST | `/api/v1/requests/{rid}/reject` | A | `{reason?}` | pedido marcado como recusado |
 
 `issue_code` devolve um convite para a pessoa se virar; `create` já cria a
@@ -366,15 +405,52 @@ mesmo portão do `unlocked`).
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
-| GET | `/api/v1/site-images/{img}/roster` | C, I, S`roster:read` | — | `{roster:[…]}` |
-| PUT | `/api/v1/site-images/{img}/roster` | C, I, S`roster:write` | `{roster:[{user_id, name, display_name, organization, country, seat}]}` | `{ok, entries}` |
+| GET | `/api/v1/site-images/{img}/roster` | C, I, S`roster:read` | — | `{roster:[…], logos:[org_id…]}` |
+| PUT | `/api/v1/site-images/{img}/roster` | C, I, S`roster:write` | `{roster:[{user_id, name, display_name, organization, country, seat}]}` | `{ok, entries, kept_bound}`: a lista inteira; **nunca apaga vínculo** (ver abaixo) |
+| POST | `/api/v1/site-images/{img}/roster` | C, I, S`roster:write` | `{user_id, name?, display_name?, organization?, country?, seat?}` | `{ok, created, entry}`: acrescenta ou atualiza **um** time pelo `user_id` |
+| DELETE | `/api/v1/site-images/{img}/roster/{user_id}` | C, I, S`roster:write` | — | `204` (o vínculo do time, se houver, não é desfeito) |
+| GET | `/api/v1/site-images/{img}/roster/logos/{org}?tk=` | C, I, S`roster:read` | — | o arquivo, para a tela (`<img>`); sai com CSP `sandbox` |
 | PUT | `/api/v1/site-images/{img}/roster/logos/{org}` | C, I, S`roster:write` | multipart `file` (SVG ou PNG) | `{ok, org_id, format, size}` |
-| PUT | `/api/v1/site-images/{img}/machines/{mac}/binding` | C, I, S`bindings:write` | `{user_id}` ou `{name, seat}` | vínculo criado |
+| PUT | `/api/v1/site-images/{img}/machines/{mac}/binding` | C, I, S`bindings:write` | `{user_id}` ou `{name, seat}`, mais `source?`, `at?`, `boot_id?`, `note?`, `create_roster_entry?` | vínculo criado (`roster_entry_created:true` quando criou a entrada) |
+| PUT | `/api/v1/site-images/{img}/bindings` | C, I, S`bindings:write` | `{bindings:[{mac, …corpo do vínculo}], create_roster_entry?}` (até 1000) | `{results:[{mac, ok, binding \| code, detail}], bound, failed}` |
 | DELETE | `/api/v1/site-images/{img}/machines/{mac}/binding` | C, I, S`bindings:write` | — | `204` |
+| GET | `/api/v1/site-images/{img}/machines/{mac}/binding/history?n=` | C, I, S`machines:read` | — | `{history:[{event, at, by, source, …}]}` |
 | GET | `/api/v1/site-images/{img}/bindings` | C, I, S`machines:read` | — | `{bindings:[{mac, …}]}` |
 
-O `user_id` do vínculo tem que existir no roster da imagem, senão vem 404 —
-é o que impede um número de assento virar vínculo fantasma.
+O `user_id` do vínculo tem que existir no roster da imagem, senão vem 404
+(`code: "user_not_in_roster"`): é o que impede um número de assento virar
+vínculo fantasma. Quem publica o vínculo no login e não controla o roster (o
+MOJ, com o roster ainda vazio) manda `create_roster_entry`: `true` (os campos do
+time vêm do próprio corpo) ou um objeto `{name, display_name, organization,
+country, seat}`. É **opt-in**, porque o `user_id` nasce de um User-Agent, que é
+entrada do cliente. A entrada criada assim leva `source: "binding"`.
+
+**Escrever o roster nunca apaga um vínculo.** O roster oficial enviado depois
+sobrescreve à vontade as entradas `source: "binding"` (e elas perdem a marca);
+se ele **omitir** um time que está vinculado a uma máquina, a entrada fica,
+marcada, e a resposta do `PUT` lista esses ids em `kept_bound`. `POST …/roster`
+e `DELETE …/roster/{user_id}` mexem em **uma** entrada, sob lock: use-os em vez
+de ler, modificar e regravar a lista (é corrida com qualquer outro escritor).
+
+`country` é rótulo: recomenda-se ISO alpha-2 (`BR`), alpha-3 passa, e o
+servidor só uniformiza a caixa. Nenhuma tela de bloqueio desenha bandeira; o
+campo segue para o `lockinfo` e para o relatório.
+
+O **lote** (`PUT …/bindings`) é o vínculo unitário repetido: cada item leva
+`mac` e o corpo de sempre, um item ruim não derruba os outros (o resultado vem
+por item, com `code`), `create_roster_entry` vale para todos e pode ser
+desligado num item, e cada vínculo gravado gera o seu `machine.bound`.
+
+O vínculo gravado tem `bound_at` e `by` (do servidor) e `source` (quem
+afirmou: o valor mandado, ou `service:<nome>` para chave de serviço e
+`console` para o resto). Todos os instantes são inteiros (epoch em
+segundos), como o `t` dos pontos e o `since`/`until` ecoados pelos samples.
+`at` do cliente vira `client_at` — o instante do
+login no juiz, por exemplo —, `boot_id` diz em qual boot e `note` é texto
+livre. Toda mudança vai para o histórico da máquina (`bindings.log`, com
+teto): `history` devolve as últimas `n` linhas, `bound` e `unbound`, a
+última com o vínculo desfeito. É o que permite ao MOJ publicar o elo no
+momento do login e a qualquer consumidor ler `binding` em vez de reconstruir.
 
 > **`GET /bindings` percorre as máquinas CONHECIDAS**, não os vínculos
 > gravados: uma máquina passa a existir quando reporta status pela primeira
@@ -387,14 +463,37 @@ O `user_id` do vínculo tem que existir no roster da imagem, senão vem 404 —
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
 | POST | `/api/v1/site-images/{img}/machines/{mac}/status` | M | JSON livre da telemetria (teto de 256 kB) | `{pending_commands, lock}` |
-| GET | `/api/v1/site-images/{img}/machines` | C, I, S`machines:read` | — | `{machines:[…]}` |
+| GET | `/api/v1/site-images/{img}/machines?active_since=` | C, I, S`machines:read` | — | `{machines:[…]}` (`active_since`: só quem reportou desde aquele epoch) |
 | GET | `/api/v1/site-images/{img}/machines/{mac}` | C, I, S`machines:read` | — | estado completo da máquina |
 | GET | `/api/v1/site-images/{img}/seeders` | C, I | — | `{seeders:[{ip, last_seen, ttl_left, released}]}` |
 | DELETE | `/api/v1/site-images/{img}/seeders/{ip}` | C, I | libera o seeder: marca `released`; a máquina vê no próximo heartbeat, sai do modo seed e termina o boot | `204` |
 
 Cada máquina devolve `online`, `seconds_since_contact`, `status` (última
-telemetria), `binding`, `lock`, `pending`, `logs` e `alerts`. O MAC é aceito
-com `:` ou `-` e normalizado para minúsculas com hífen.
+telemetria), `binding`, `lock`, `pending`, `logs` e `alerts`, e o que o
+servidor deduz do que viu: `boot_id`, `boots` (quantos boots distintos),
+`boot_seen_at`, `last_boot` (o instante do boot, mandado pelo agente novo ou
+o primeiro contato daquele boot) e `editors_reset_at` (o ack do último
+`resetcontaeditores`/`precontest` — é desde então que `editors_time` conta).
+O MAC é aceito com `:` ou `-` e normalizado para minúsculas com hífen.
+
+O agente novo manda, além do que sempre mandou, `t_agent` (relógio da
+máquina) no topo, `hwinfo.{mac, hostname, dmi_uuid, product_name,
+product_vendor, uptime_s, last_boot, monitors, monitor_outputs}`, `sysresources.{psi_mem, psi_cpu,
+psi_io, oom_kills, idle_s}` e `operations.editors_time_since`. Tudo
+opcional: máquina com agente antigo continua válida.
+
+**Qual agente é este.** A frota é mista (o agente chega por uma camada, sede a
+sede), então não adivinhe a versão pela presença de um campo: o agente se
+declara no topo do status com `agent_version` (ex.: `"2026.09.2"`) e
+`capabilities`, a lista do que ele sabe medir: `psi`, `oom`, `idle`, `skew`
+(manda `t_agent`), `editors_since` e `ua_mac` (o User-Agent desta máquina leva
+o MAC no fim). Campo ausente num agente que o anuncia quer dizer "não deu para
+medir aqui" (kernel sem PSI, sessão sem monitor de ociosidade); sem
+`agent_version`, é o agente antigo.
+
+Quando duas máquinas da
+sede reportam o mesmo `hwinfo.machine_id`, a segunda ganha um alerta
+`identity.duplicate` (com `other_mac`) — home clonada por imagem de disco.
 
 O corpo do `status` é JSON livre de propósito: um coletor novo em
 `parts.d/` no cliente entra sem mudança no servidor. Livre não é infinito —
@@ -406,14 +505,43 @@ acima de 256 kB a resposta é **413**.
 |---|---|---|---|---|
 | POST | `/api/v1/site-images/{img}/machines/{mac}/logs?origem=` | M | `text/plain`, até 1 MiB | `{ok, stored, at}` |
 | GET | `/api/v1/site-images/{img}/machines/{mac}/logs?tail=500` | C, I, S`machines:read` | — | `{bytes, journal, acks}` |
-| GET | `/api/v1/site-images/{img}/machines/{mac}/samples?since=&until=` | C, I, S`machines:read` | — | `{mac, points, truncated}` |
+| GET | `/api/v1/site-images/{img}/machines/{mac}/samples?since=&until=&limit=` | C, I, S`machines:read` | — | `{mac, points, native_points, resampled, interval_s, since, until, truncated}` |
+| GET | `/api/v1/site-images/{img}/samples?since=&until=&limit=&active_since=` | C, I, S`machines:read` | — | NDJSON: uma linha por máquina, no mesmo formato |
 
 Os `points` são a série que o `samples.jsonl` guarda por máquina (uma amostra
-por telemetria, ~45 s): `t` epoch, `mem` % de RAM, `ld` load1, `sw` MB de
-swap, `hd` % do `/home`. A resposta tem teto de 400 pontos (janela longa sai
-com passo maior); `truncated` avisa que o arquivo já chegou ao cap de 2 MiB e
-o começo mais antigo foi descartado. É o que alimenta os gráficos do duplo
-clique no hotconfig.
+por telemetria, a cada 40 a 59 s): `t` epoch (relógio do servidor), `mem` %
+de RAM, `ld` load1, `sw` MB de swap, `hd` % do `/home`, `ed` editores abertos
+(até 8), `fw` 0/1, `lk` 1 quando a tela está bloqueada — e, quando o agente
+manda, `psi_mem`/`psi_cpu`/`psi_io` (pressão, `some avg60`), `oom` (OOM
+kills desde o boot), `idle` (segundos sem teclado/mouse), `edm` (minutos
+acumulados de editor), `eds` (desde quando `edm` conta) e `skew` (relógio do
+servidor menos o do agente, em segundos).
+
+`limit` (1 a 5000, padrão 400) reamostra com passo uniforme mantendo sempre
+o primeiro e o último ponto; `resampled` diz se isso aconteceu,
+`native_points` quantos pontos a janela tinha e `interval_s` a mediana do
+intervalo nativo — sem isso ninguém distingue a cadência do agente do passo
+do reamostrador. `truncated` só é verdadeiro quando o teto de 2 MiB do
+arquivo cortou de fato e o que sobrou começa depois de `since`. É o que
+alimenta os gráficos do duplo clique no hotconfig.
+
+A rota em lote (`/site-images/{img}/samples`) responde `application/x-ndjson`:
+uma linha por máquina conhecida, no mesmo formato, gerada máquina a máquina;
+`active_since` pula quem não reportou desde aquele instante. Um request por
+sede em vez de um por máquina:
+
+```bash
+curl -sN "$SERVER/api/v1/site-images/26brbr/samples?since=$SINCE&until=$UNTIL&limit=1000&active_since=$SINCE" \
+    -H "Authorization: Bearer $NB3S" | while IFS= read -r linha; do echo "$linha" | jq -c '{mac, n: .native_points}'; done
+```
+
+No lote, `limit` vale **por máquina** (cada linha tem até `limit` pontos), e
+`truncated` é **de cada linha**: diz que o arquivo daquela máquina foi cortado
+pelo teto dentro da janela pedida, não que a resposta HTTP veio incompleta.
+`since` e `until` voltam inteiros. A rota comprime quando o cliente pede
+(`Accept-Encoding: gzip`, que o `curl --compressed` manda): uma sede de 300
+máquinas são vários MB de JSON repetitivo, que encolhem umas dez vezes. É a
+única rota que comprime; o SSE e o long-poll não passam por gzip.
 
 O agente manda o journal do boot na partida e, a cada 5 minutos, só o que
 apareceu desde o envio anterior (usando `journalctl --cursor-file`, que não
@@ -432,12 +560,15 @@ eram gravadas e não podiam ser lidas por rota nenhuma.
 |---|---|---|---|---|
 | POST | `/api/v1/site-images/{img}/machines/{mac}/events` | M | `{kind, detail?, vendor?}` | `{ok, id}` |
 | GET | `/api/v1/site-images/{img}/alerts` | C, I, S`machines:read` | — | `{alerts:[…]}` abertos da sede |
-| POST | `/api/v1/site-images/{img}/machines/{mac}/alerts/{id}/dismiss` | C, I, S`commands:write` | — | `{ok, alert}` |
-| POST | `/api/v1/site-images/{img}/machines/{mac}/alerts/dismiss-all` | C, I, S`commands:write` | — | `{ok, dismissed}` |
+| GET | `/api/v1/site-images/{img}/alerts/history?since=&n=` | C, I, S`machines:read` | — | `{history:[{mac, event, id, kind, at, dismissed_at?, dismissed_by?, …}]}`: toda a sede, do mais recente ao mais antigo |
+| POST | `/api/v1/site-images/{img}/machines/{mac}/alerts/{id}/dismiss` | C, I, S`alerts:write` (ou `commands:write`, legado) | — | `{ok, alert}` |
+| POST | `/api/v1/site-images/{img}/machines/{mac}/alerts/dismiss-all` | C, I, S`alerts:write` (ou `commands:write`, legado) | — | `{ok, dismissed}` |
 | GET | `/api/v1/site-images/{img}/machines/{mac}/alerts/history` | C, I, S`machines:read` | — | `{history:[…]}` datado |
 
 `kind` conhecido: `usb.storage` (pendrive, HD externo), `usb.phone` (MTP/PTP),
-`usb.network` (tethering) e `usb.other`. Um `kind` desconhecido **é aceito** —
+`usb.network` (tethering), `usb.other` e `display.multiple` (mais monitores
+acesos que o campo "Monitores permitidos", `MAXMONITORS`; o `detail` diz
+quantos e em quais saídas, como `2 monitores: DP-1, HDMI-A-1`). Um `kind` desconhecido **é aceito** —
 o cliente pode ganhar um detector novo sem esperar o servidor.
 
 **O alerta fica até alguém dispensar.** Não some quando o dispositivo é
@@ -446,7 +577,9 @@ Sobrevive a reboot da máquina, a recarga da página e a reinício do servidor
 (está em disco). Dispensar grava quem foi e quando, no histórico.
 
 A máquina **não** dispensa o próprio alerta: adulterar o agente não apaga o
-rastro. O evento `alert.raised` também vai por webhook, para o MOJ.
+rastro. O evento `alert.raised` também vai por webhook, para o MOJ — só para
+alerta novo: um evento igual (`kind`, `detail`, `vendor`) a um alerta ainda
+aberto da máquina devolve o existente com `repeated: true` e não emite nada.
 
 ### Frota: todas as sedes de uma vez
 
@@ -455,8 +588,10 @@ que está acontecendo no conjunto, e como ajo num recorte dele".
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
-| GET | `/api/v1/labs` | C | `?dias=7` e `?format=csv` | `{sites:[{id, fullname, machines, active, new, online, locked, alerts, unbound}], days}` |
+| GET | `/api/v1/labs` | C, S`labs:read` | `?dias=7`, `?format=csv`, `?view=all\|mine`, `?owner=<owner_ref>` | `{sites:[{id, fullname, owner_kind, owner_label, owner_ref, machines, active, new, online, locked, alerts, unbound}], days, view}` |
 | POST | `/api/v1/commands` | C | `{command, targets, args?, delay?}` | `{results, machines, failed}` |
+| GET | `/api/v1/labs/view` | C | — | `{view:{mode, owners, images, updated_at, updated_by}, meta:{mode, shown, total, outside, new_outside}, owners?}` (`owners` só para a administração) |
+| PUT | `/api/v1/labs/view` | C | `{mode: mine\|all\|owners\|custom, owners?:[owner_ref], images?:[id]}` | `{view, meta}`; `400` para modo, dono ou imagem desconhecidos |
 | GET | `/api/v1/labs/inventory` | C, S`labs:read` | — | de que é feito o parque: `{machines, processors, ram, sites_hw, editors_now, editors_minutes, disks, disks_low}` |
 | GET | `/api/v1/labs/series` | C, S`labs:read` | `?since=&until=&site=` | o histórico da frota (1 ponto/min, com teto de pontos): `{points:[{t, online, mem, cpu, alerts}]}` |
 
@@ -464,12 +599,41 @@ que está acontecendo no conjunto, e como ajo num recorte dele".
 Cada sede vira uma entrada em `results` — com `command_id` e `machines`, ou com
 `error` e `status`.
 
+Sede marcada `dashboard_hidden` não entra em nenhuma das três leituras.
+
+**A visão da frota.** As três leituras mostram um **recorte**, guardado no
+servidor por dono (vale em qualquer navegador e no telão):
+
+| `mode` | O que mostra |
+|---|---|
+| `mine` | só as imagens de quem olha. **É o padrão**: a administração via os laboratórios de todo mundo que entrou por convite misturados às sedes da prova |
+| `all` | tudo o que ele pode ver |
+| `owners` | as imagens dos donos em `owners` (lista de `owner_ref`; `admin` é a administração). Só a administração |
+| `custom` | as imagens em `images`, escolhidas à mão |
+
+A visão só **estreita**: o teto é o que o principal já podia ver (o sub-admin
+continua vendo só as dele) e `dashboard_hidden` segue exclusão dura. Imagem
+criada **depois** de um `custom` salvo fica de fora até ser escolhida (`meta.
+new_outside` a lista): o laboratório novo de alguém não pula para o telão
+sozinho. `?view=all|mine` e `?owner=<owner_ref>` são a olhada **sem salvar**, e
+valem só para o console. **Ferramenta que lê `/labs` com chave de admin e quer a
+frota inteira passa `?view=all`.**
+
+Cada linha diz de quem é a sede: `owner_kind`, `owner_label` e `owner_ref`
+(nunca o código do convite).
+
 As rotas de leitura da frota (`/labs`, `/labs/inventory`, `/labs/series`)
 aceitam também a **chave de serviço com escopo `labs:read`** — é a chave
 compartilhável do dashboard, por `?tk=` na URL ou Bearer. Ela só lê agregados:
 não abre hotconfig (o painel exige `machines:read`, que não é concedido) nem
 roda comando (as rotas de comando exigem console). A visibilidade respeita os
 globs da chave, e os totais são recalculados do subconjunto visível.
+
+Uma chave `labs:read` pode **seguir a visão da administração** (`follow:
+"admin"` na chave): o link compartilhado mostra o que o admin escolheu, e muda
+na hora em que ele muda. Os globs da chave continuam sendo o teto, a chave
+ignora `?view=` e `?owner=` (o link não se alarga sozinho) e não recebe a conta
+do que ficou de fora. Chave sem `follow` se comporta como sempre.
 
 `dias` responde **quantas máquinas de cada sede rodaram nos últimos X dias**, e
 são dois números porque a pergunta tem duas leituras: `active` é quem teve
@@ -549,11 +713,12 @@ token e a chave de máquina de cada sede. Nome fora da lista é `404`.
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
 | POST | `/api/v1/site-images/{img}/commands` | C, I, S`commands:write` | `{command, target, args?, delay?}` | `{command_id, machines}` |
+| GET | `/api/v1/site-images/{img}/commands/{command_id}` | C, I, S`commands:write` | — | `{command_id, command, args, by, created_at, not_before, expires_at, machines, summary:{acked, pending, expired}, targets:[{mac, state, status?, at?, output_bytes?}]}` |
 | GET | `/api/v1/site-images/{img}/commands` | C, I, S`commands:write` | — | `{allowed:[…], blocked:{comando: campo}}` |
 | GET | `/api/v1/site-images/{img}/machines/{mac}/commands?wait=25` | M | — | `{commands:[…], lock}` (long-poll) |
 | POST | `/api/v1/site-images/{img}/machines/{mac}/commands/{cid}/ack` | M | `{status, output?}` | `{ok, found}` |
-| POST | `/api/v1/site-images/{img}/lock` | C, I, S`commands:write` | — | trava a TELA de todas as máquinas |
-| POST | `/api/v1/site-images/{img}/unlock` | C, I, S`commands:write` | — | destrava a tela de todas |
+| POST | `/api/v1/site-images/{img}/lock` | C, I, S`commands:write` | — | trava a TELA de todas as máquinas. Corpo com `target` (≠ `"all"`), `targets`, `macs`, `mac` ou `machines` dá **400 `no_target`**: para algumas máquinas, a rota por MAC |
+| POST | `/api/v1/site-images/{img}/unlock` | C, I, S`commands:write` | — | destrava a tela de todas (mesmo portão do `lock`) |
 | POST | `/api/v1/site-images/{img}/machines/{mac}/lock` | C, I, S`commands:write` | — | idem, para uma máquina |
 | POST | `/api/v1/site-images/{img}/machines/{mac}/unlock` | C, I, S`commands:write` | — | idem |
 
@@ -564,6 +729,25 @@ token e a chave de máquina de cada sede. Nome fora da lista é `404`.
 > desbloqueia a sala inteira.
 
 `target` é `"all"` ou uma lista de MACs. `delay` adia a execução em segundos.
+
+**Quem executou.** `GET …/commands/{command_id}` responde por máquina:
+`acked` (com o `status` que a máquina mandou; `error` também é confirmação),
+`pending` (o comando ainda vale e ela não confirmou) ou `expired` (caducou; a
+máquina desligada nunca escreve nada, o estado dela se deduz do prazo). O
+registro guarda os últimos 500 comandos da sede, por 7 dias; comando anterior a
+isso responde `404 command_not_found`. O evento `command.acked` traz
+`command_id` e `command` (`id` continua, é o mesmo valor).
+Sem `target` o comando vale para **a sala inteira**; por isso um corpo que traz
+`macs`, `mac` ou `targets` sem `target` responde **400**: quem mandou um desses
+quis escolher máquinas e errou o campo, e obedecer o padrão ali desligaria a
+sala toda por engano (o `nb3-api` fez exatamente isso até setembro de 2026).
+Um `target` que não seja `"all"` nem lista também é 400.
+
+Uma ordem que nenhuma máquina buscou caduca `command_ttl_sec` segundos
+(`data/server.json`, padrão 600) depois do seu `not_before`: é apagada da fila
+na leitura seguinte e registrada nos `acks` da máquina com `status: "expired"`.
+É o que impede um "desligar" mandado hoje de desligar a máquina que só ligar
+amanhã — o alvo `"all"` inclui as máquinas desligadas no momento do envio.
 Comandos aceitos: `donottouch`, `cantouch`, `cleanhomenow`, `mlreboot`,
 `mlpoweroff`, `disablefirewall`, `enablefirewall`, `resetcontaeditores`,
 `precontest`. Qualquer outro valor é recusado com `400`.
@@ -619,9 +803,9 @@ Eventos: `machine.first_seen`, `machine.status`, `machine.locked`,
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
 | POST | `/api/v1/layerbuilds` | C | `{name, model, packages:[…], attach_to?}` | job criado (sub-admin gasta `build_quota`) |
-| GET | `/api/v1/layerbuilds` | C | — | `{builds:[{…, state}]}` (filtrado por dono) |
+| GET | `/api/v1/layerbuilds` | C | — | `{builds:[{…, state}]}` (filtrado por dono); as prontas trazem `attached:{images, model}` (onde a camada está: imagens que quem pergunta enxerga, e o modelo da construção) e `available` (o arquivo ainda tem de onde ser baixado) |
 | GET | `/api/v1/layerbuilds/{job}` | C | — | job + últimos 8000 caracteres do log |
-| POST | `/api/v1/layerbuilds/{job}/attach` | C | `{image_ids:[…]}` | `{ok, layer, images}` |
+| POST | `/api/v1/layerbuilds/{job}/attach` | C | `{image_ids?:[…], model?: true}` | `{ok, layer, images, model}`. `model: true` anexa ao modelo **da construção** (nunca a outro: a camada leva o estado do apt daquela base), na frente. Corpo vazio usa o `attach_to` do pedido. Sem arquivo para baixar: **409** |
 | GET | `/api/v1/site-images/{img}/layers` | C, I | — | `{extra:[…], all:[…]}` |
 | POST | `/api/v1/site-images/{img}/layers` | C | `{md5, file, size?, cdn_url?}` | `{ok, layer}` |
 | DELETE | `/api/v1/site-images/{img}/layers/{file}` | C | — | `204` |
@@ -678,7 +862,7 @@ ganha um sufixo aleatório no nome por causa da chave que carrega.
 
 | Método | Caminho | Cred. | Resposta |
 |---|---|---|---|
-| GET | `/api/v1/site-images/{img}/report?since=&until=&format=&lang=` | C, I | HTML autocontido (padrão) ou JSON com `format=json` |
+| GET | `/api/v1/site-images/{img}/report?since=&until=&format=&lang=` | C, I, S`machines:read` | HTML autocontido (padrão) ou JSON com `format=json` |
 
 `since`/`until` em epoch. `lang` é `pt`, `en` ou `es`. O HTML **não busca nada
 de fora** — CSS embutido e gráficos em SVG desenhados pelo servidor —, então
@@ -696,7 +880,7 @@ de pacotes extras, gastando a cota dela:
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
-| POST | `/api/v1/site-images/{img}/layerbuilds` | C, I | `{name, packages:[…]}` | job criado + `quota` restante |
+| POST | `/api/v1/site-images/{img}/layerbuilds` | C, I | `{name, packages:[…]}` | job criado + `quota` (a da imagem, para o token dela). O sub-admin gasta a cota **dele**, a mesma do `POST /layerbuilds` |
 | GET | `/api/v1/site-images/{img}/layerbuilds` | C, I | — | `{jobs:[…], quota}` |
 
 ### Publicação no servidor de arquivos
@@ -714,16 +898,86 @@ de pacotes extras, gastando a cota dela:
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
-| GET | `/api/v1/site-images/{img}/webhooks` | A | — | lista com o segredo mascarado (`***`) |
-| PUT | `/api/v1/site-images/{img}/webhooks` | A | `{webhooks:[{url, secret, events}]}` | `{ok, webhooks}` |
-| POST | `/api/v1/service-keys` | A | `{name, scopes:[…], images:[globs]}` | `{name, key, scopes, images}` |
-| GET | `/api/v1/service-keys` | A | — | lista sem as chaves |
+| GET | `/api/v1/site-images/{img}/webhooks` | A, S`webhooks:write` | — | `{webhooks:[{id, url, secret, events, owner, created_at}]}`, com o segredo mascarado (`***`). A chave de serviço vê só os que ela criou |
+| POST | `/api/v1/site-images/{img}/webhooks` | A, S`webhooks:write` | `{url, secret?, events?}` | `201` a entrada com `id` e `created:true`. A mesma `url` pelo mesmo dono atualiza a entrada (`200`, `created:false`, mesmo `id`) em vez de duplicar |
+| PUT | `/api/v1/site-images/{img}/webhooks/{id}` | A, S`webhooks:write` | qualquer de `{url, events, secret}` | a entrada. Mandar só `secret` é a rotação do segredo |
+| DELETE | `/api/v1/site-images/{img}/webhooks/{id}` | A, S`webhooks:write` | — | `204` |
+| POST | `/api/v1/site-images/{img}/webhooks/{id}/test` | A, S`webhooks:write` | — | entrega `webhook.test` agora: `{ok, status_code, error, elapsed_ms, delivery}` |
+| GET | `/api/v1/site-images/{img}/webhooks/deliveries?n=` | A, S`webhooks:write` | — | `{deliveries:[…]}`: as entregas que esgotaram as tentativas (`webhooks.log`) |
+| PUT | `/api/v1/site-images/{img}/webhooks` | A | `{webhooks:[{id?, url, secret?, events}]}` | `{ok, webhooks, kept}`: a lista inteira, só da administração (ver abaixo) |
+| POST | `/api/v1/service-keys` | A | `{name, scopes:[…], images:[globs], follow?}` | `{name, key, scopes, images, follow, created_at, created_by}`; a chave aparece **uma vez**. Nome que já existe é `409 key_exists` (não sobrescreve) |
+| GET | `/api/v1/service-keys` | A | — | `{service_keys:[{name, scopes, images, follow, created_at, created_by, rotated_at, last_used}]}`, sem as chaves |
+| PATCH | `/api/v1/service-keys/{nome}` | A | qualquer de `{scopes, images, follow}` | a chave atualizada (a credencial não muda) |
+| POST | `/api/v1/service-keys/{nome}/rotate` | A | — | chave nova com o **mesmo** nome, escopos e globs; a antiga morre na hora |
 | DELETE | `/api/v1/service-keys/{nome}` | A | — | `204` |
+| GET | `/api/v1/admin-keys` | A | — | `{keys:[{id, fp, created_at, created_by, last_used, current, sessions}]}` (`current`: a chave desta requisição) |
+| POST | `/api/v1/admin-keys` | A + reautenticação | `{id, current_key?}` | `201` `{id, key, fp, created_at}`; a chave aparece **uma vez** |
+| POST | `/api/v1/admin-keys/{id}/revoke` | A + reautenticação | `{current_key?, fp?, confirm?}` | `{revoked, fp, sessions_ended, remaining}` |
+| GET | `/api/v1/audit?limit=` | A | — | `{entries:[{at, actor_kind, actor, ip, action, target, detail}]}`, o mais recente primeiro |
 
-Eventos disponíveis: `machine.first_seen`, `machine.status`, `machine.locked`, `machine.unlocked`, `machine.bound`, `machine.unbound`, `command.sent`, `command.acked`, `config.updated`, `seeder.joined`, `seeder.released`, `alert.raised` e `alert.dismissed` (a lista viva está em `GET /api/v1/events/types`).
+**Chaves de administração.** Cunhar e revogar chave de admin é o único ato que
+sobrevive à sessão que o fez, então pede **prova de posse da chave**: quem chama
+por `Authorization: Bearer` já provou; quem chama pela sessão do navegador
+manda `current_key` (a MESMA chave com que entrou), senão vem `403
+reauth_required`. Regras: nunca se revoga a **última** chave (`409
+last_admin_key`); revogar a chave da própria sessão pede `confirm: "<id>"`
+(`409 confirm_required`); se houver duas chaves com o mesmo `id` (herança do
+`nb3-init` antigo), `fp` desempata (`409 key_ambiguous`). Revogar derruba as
+sessões abertas com aquela chave, e só elas. Não existe "rotacionar": crie a
+nova, confira que ela entra, e revogue a velha.
+
+`last_used` (de chave de admin e de serviço) é mantido em memória e vai ao
+disco no máximo uma vez por minuto; serve para achar chave esquecida, não para
+perícia. Todo ato sobre credencial fica em `GET /api/v1/audit`, sem segredo
+nenhum (o convite aparece pela referência do dono, não pelo código).
+
+Eventos disponíveis (a lista viva está em `GET /api/v1/events/types`):
+
+| Evento | `data` | Quando |
+|---|---|---|
+| `machine.first_seen` | `{mac}` | o primeiro contato da máquina |
+| `machine.status` | `{mac}` | **a cada telemetria** (dezenas por segundo na frota: não assine sem precisar) |
+| `machine.rebooted` | `{mac, boot_id, previous_boot_id, boots, last_boot}` | o `boot_id` mudou (nunca no primeiro contato) |
+| `machine.offline` | `{mac, last_seen}` | 90 s sem telemetria; o vigia confere a cada 30 s |
+| `machine.online` | `{mac, offline_for}` | voltou a reportar depois de 90 s ou mais fora |
+| `machine.locked`, `machine.unlocked` | `{machines:[mac…]}` | trava e destrava |
+| `machine.bound`, `machine.unbound` | `{mac, …vínculo}` | vínculo com o time |
+| `command.sent` | `{id, command, machines}` | comando enfileirado |
+| `command.acked` | `{mac, id, command_id, command, status}` | a máquina confirmou |
+| `command.expired` | `{command_id, command, machines:[mac…], count}` | o prazo do comando venceu com máquinas sem confirmar (um evento por comando; melhor esforço: a fonte da verdade é `GET …/commands/{command_id}`) |
+| `alert.raised`, `alert.dismissed` | `{mac, id, kind, detail?, vendor?, other_mac?, boot_id, binding}` | `alert.raised` só para alerta NOVO; `binding` é `{user_id}` ou `null` |
+| `config.updated` | `{keys:[…]}` | a sede gravou configuração |
+| `seeder.joined`, `seeder.released` | `{ip}` | modo seed |
+
+`machine.online` e `machine.rebooted` saem da própria telemetria (do que o
+disco lembrava do contato anterior) e sobrevivem a um restart do servidor.
+`machine.offline` depende do vigia em memória: depois de um restart o aviso pode
+sair atrasado ou repetido, e quem já estava desligado quando o servidor subiu
+não é anunciado.
 
 `events` vazio significa "todos os eventos". A URL precisa começar com
 `http://` ou `https://`, e cada evento é validado contra o catálogo.
+
+Cada webhook tem um **dono**: `admin`, ou `service:<nome>` quando foi uma chave
+de serviço que o criou. A chave de serviço só enxerga e só mexe nos seus (o de
+outro dono responde `404 webhook_not_found`), nas imagens do glob dela, com no
+máximo 5 por imagem e segredo obrigatório (16 caracteres ou mais). Sub-admin e
+token da sede não entram aqui: um webhook é o servidor batendo numa URL
+escolhida por quem o configura, de dentro da rede de gestão.
+
+Pelo mesmo motivo, a URL de um webhook de chave de **serviço** precisa ser
+`https` para um endereço público. Destino interno só quando a administração o
+libera em `data/server.json`
+(`{"webhooks": {"allow_hosts": ["moj.interno", "10.1.0.0/16"]}}`); fora disso
+vem `400 webhook_url_forbidden`. A conferência roda ao gravar e de novo a cada
+entrega. Os webhooks da administração apontam para onde ela quiser.
+
+O **`PUT` da lista inteira** continua existindo para a administração, e foi
+feito para o ler-e-regravar não destruir nada: a entrada é casada por `id` e
+depois por `url` (e mantém `id`, dono e data); `secret` ausente ou igual à
+máscara `***` **mantém o segredo gravado** (`""` limpa); e webhook de chave de
+serviço que ficou de fora **não é apagado** (`kept` diz quantos). Para apagar,
+use o `DELETE` por `id`.
 
 ---
 
@@ -734,14 +988,27 @@ integra leva o arquivo e usa, sem venv, sem `pip` e sem depender deste
 repositório.
 
 ```bash
-export NB3_BASE_URL=https://nutellaboot.naquadah.com.br
+export NB3_BASE_URL=https://nutellaboot.mdp.naquadah.com.br
 export NB3_API_KEY=nb3s_...          # serve nb3a_, nb3s_ e o nb3i_ da sede
 
-nb3-api whoami
+nb3-api whoami                       # com nb3s_: escopos, globs e as imagens que eles cobrem
 nb3-api bulk sedes.tsv > credenciais.csv
-nb3-api roster set 26brbr @times.json
+nb3-api roster set 26brbr @times.json                # a lista inteira
+nb3-api roster add 26brbr '{"user_id":"team-001","name":"Os Batatinhas"}'   # um time
+nb3-api roster remove 26brbr team-001
 nb3-api bind 26brbr 52-54-00-12-34-56 team-001 --seat 012
+nb3-api bind 26brbr 52-54-00-12-34-56 team-002 --criar --name "Dois"   # cria o time que faltar
+nb3-api bind-lote 26brbr @vinculos.json --criar      # até 1000 por pedido
 nb3-api lock 26brbr                  # a sala inteira
+nb3-api command 26brbr mlreboot 52-54-00-12-34-56    # só esta máquina
+nb3-api command 26brbr cleanhomenow --all            # a sala inteira, por extenso
+nb3-api command-status 26brbr 3f9c1a2b7d4e           # quem executou
+nb3-api logo 26brbr ufu ufu.png                      # PNG ou SVG
+nb3-api webhooks add 26brbr --url https://moj.example/h --secret "$SEGREDO" --event alert.raised
+nb3-api webhooks list 26brbr
+nb3-api webhooks test 26brbr --id wh_1a2b3c4d5e6f     # entrega um webhook.test agora
+nb3-api webhooks update 26brbr --id wh_1a2b3c4d5e6f --secret "$NOVO"    # rotação
+nb3-api webhooks delete 26brbr --id wh_1a2b3c4d5e6f
 nb3-api machines 26brbr
 nb3-api report 26brbr 1785600000 1785700000 > relatorio.html
 ```
@@ -766,17 +1033,20 @@ Os exemplos abaixo usam a sede `26brbr`.
 
 ### 1. Criar a chave de serviço
 
-Feito uma vez, pela administração. Os escopos limitam o que a chave faz, e
-`images` limita onde ela age.
+Feito pela administração. Os escopos limitam o que a chave faz, e `images`
+limita onde ela age. O recomendado é **uma chave por evento**, com o glob das
+imagens daquele evento: a chave de administração não precisa ficar gravada em
+lugar nenhum do lado de quem integra.
 
 ```bash
-curl -sS -X POST https://nutellaboot.naquadah.com.br/api/v1/service-keys \
+curl -sS -X POST https://nutellaboot.mdp.naquadah.com.br/api/v1/service-keys \
   -H "Authorization: Bearer $ADMIN_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
         "name": "moj",
-        "scopes": ["machines:read", "commands:write",
-                   "bindings:write", "roster:read", "roster:write"],
+        "scopes": ["machines:read", "commands:write", "alerts:write",
+                   "bindings:write", "roster:read", "roster:write",
+                   "webhooks:write"],
         "images": ["26*"]
       }'
 ```
@@ -787,10 +1057,29 @@ Resposta (a chave aparece **uma única vez**):
 {"name":"moj","key":"nb3s_…","scopes":["machines:read","…"],"images":["26*"]}
 ```
 
+### 1b. O que a chave dá
+
+A chave se enxerga: `GET /api/v1/whoami` devolve os escopos, os globs crus
+(`image_globs`; lista vazia = todas) e as imagens que eles cobrem **agora**
+(`images`), e `GET /api/v1/site-images` lista essas imagens com `fullname`,
+`country` (quando se sabe) e `machines_total`. É o preflight: prova que a chave
+vale, diz que escopo falta sem sondar com 403 e dispensa digitar os ids.
+`alerts:write` dispensa alertas sem dar o poder de comando.
+
+`machines:read` lê máquinas, `samples` (por máquina e em lote:
+`GET /site-images/{img}/samples?since&until&limit&active_since`, NDJSON) e o
+relatório; `bindings:write` publica o elo máquina ↔ time no momento do login:
+
+```bash
+curl -sS -X PUT https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/machines/52-54-00-12-34-56/binding \
+  -H "Authorization: Bearer $NB3S" -H 'Content-Type: application/json' \
+  -d '{"user_id": "team-001", "source": "moj-login", "at": 1788026460, "boot_id": "2172579592"}'
+```
+
 ### 2. Enviar o roster dos times
 
 ```bash
-curl -sS -X PUT https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/roster \
+curl -sS -X PUT https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/roster \
   -H "Authorization: Bearer $MOJ_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -800,7 +1089,7 @@ curl -sS -X PUT https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/ro
             "name": "Os Batatinhas",
             "display_name": "UnB — Os Batatinhas",
             "organization": {"id": "unb", "name": "Universidade de Brasília"},
-            "country": "BRA",
+            "country": "BR",
             "seat": "012"
           }
         ]
@@ -811,7 +1100,7 @@ curl -sS -X PUT https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/ro
 
 ```bash
 curl -sS -X PUT \
-  https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/roster/logos/unb \
+  https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/roster/logos/unb \
   -H "Authorization: Bearer $MOJ_KEY" \
   -F file=@unb.svg
 ```
@@ -823,26 +1112,30 @@ barra nem `..`.
 
 ```bash
 curl -sS -X PUT \
-  https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/machines/52-54-00-12-34-56/binding \
+  https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/machines/52-54-00-12-34-56/binding \
   -H "Authorization: Bearer $MOJ_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"user_id": "team-001"}'
 ```
 
-O `user_id` precisa existir no roster da imagem, senão a resposta é `404`. A
-partir daí a tela de bloqueio daquela máquina mostra o nome do time, o
-logotipo, a bandeira e o lugar.
+O `user_id` precisa existir no roster da imagem, senão a resposta é `404`
+(`code: "user_not_in_roster"`); com `"create_roster_entry": {...}` o vínculo
+cria a entrada que faltar (seção "Roster e vínculo"). A partir daí a tela de
+bloqueio daquela máquina mostra o nome do time, o logotipo e o lugar.
+
+Na largada (milhares de logins em minutos) e no replay, use o lote: `PUT
+…/site-images/<sede>/bindings` com até 1000 itens por pedido.
 
 ### 5. Bloquear e desbloquear
 
 ```bash
 # a sala inteira
-curl -sS -X POST https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/lock \
+curl -sS -X POST https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/lock \
   -H "Authorization: Bearer $MOJ_KEY"
 
 # uma máquina
 curl -sS -X POST \
-  https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/machines/52-54-00-12-34-56/unlock \
+  https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/machines/52-54-00-12-34-56/unlock \
   -H "Authorization: Bearer $MOJ_KEY"
 ```
 
@@ -852,7 +1145,7 @@ máquinas recebem em poucos segundos, porque estão penduradas no long-poll.
 ### 6. Ler telemetria
 
 ```bash
-curl -sS https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/machines \
+curl -sS https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/machines \
   -H "Authorization: Bearer $MOJ_KEY"
 ```
 
@@ -863,12 +1156,17 @@ curl -sS https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/machines 
     "online": true,
     "seconds_since_contact": 12,
     "lock": {"locked": false, "since": 1785620000, "by": "moj"},
-    "binding": {"user_id": "team-001", "seat": "012"},
+    "binding": {"user_id": "team-001", "seat": "012", "source": "moj-login", "bound_at": 1785620100, "by": "moj"},
     "pending": 0,
+    "boot_id": "2172579592", "boots": 3, "last_boot": 1785619000, "editors_reset_at": 1785620400,
     "status": {
-      "hwinfo": {"processor": "…", "cores": 8, "memtotal_mb": 15900},
-      "sysresources": {"mem_pct": 41, "loadavg": [0.6, 0.4, 0.3], "alerts": []},
-      "operations": {"firewall": true, "screen_lock": false, "editors": ["code"]}
+      "t_agent": 1785620500,
+      "hwinfo": {"processor": "…", "cores": 8, "memtotal_mb": 15900,
+                 "machine_id": "3f2…", "boot_id": "2172579592", "image": "26brbr",
+                 "mac": "52-54-00-12-34-56", "dmi_uuid": "…", "product_name": "OptiPlex 3090", "uptime_s": 1500, "last_boot": 1785619000},
+      "sysresources": {"mem_pct": 41, "loadavg": [0.6, 0.4, 0.3], "alerts": [], "psi_mem": 0.4, "oom_kills": 0, "idle_s": 12},
+      "operations": {"firewall": true, "screen_lock": false, "editors": ["code"],
+                     "editors_time": {"code": 40, "total": 42}, "editors_time_since": 1785620400}
     }
   }
 ]}
@@ -876,10 +1174,21 @@ curl -sS https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/machines 
 
 ### 7. Receber eventos por webhook
 
-Configuração (pela administração):
+Com o escopo `webhooks:write`, a própria chave de serviço instala o webhook (e
+reinstalar com a mesma URL não duplica):
 
 ```bash
-curl -sS -X PUT https://nutellaboot.naquadah.com.br/api/v1/site-images/26brbr/webhooks \
+curl -sS -X POST https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/webhooks \
+  -H "Authorization: Bearer $NB3S" -H 'Content-Type: application/json' \
+  -d '{"url": "https://moj.naquadah.com.br/hooks/nutellaboot?contest=c1",
+       "secret": "um-segredo-de-16-caracteres-ou-mais",
+       "events": ["alert.raised", "alert.dismissed"]}'
+```
+
+Ou pela administração, com a lista inteira:
+
+```bash
+curl -sS -X PUT https://nutellaboot.mdp.naquadah.com.br/api/v1/site-images/26brbr/webhooks \
   -H "Authorization: Bearer $ADMIN_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -900,10 +1209,26 @@ Cada evento chega como `POST` com corpo JSON e o cabeçalho
 {
   "event": "machine.locked",
   "image": "26brbr",
-  "at": 1785620123.45,
+  "at": 1785620123,
+  "delivery": "5f0c1d6e2a7b4c1e9d3f8a6b7c5d4e3f",
   "data": {"machines": ["52-54-00-12-34-56"]}
 }
 ```
+
+`at` é o instante do **evento**, inteiro. `delivery` identifica a entrega e vai
+dentro do corpo (logo, dentro da assinatura): é o mesmo nas três tentativas,
+assim como o corpo inteiro, byte a byte. **Deduplique por `delivery`**: uma
+tentativa repetida é a mesma entrega cuja resposta se perdeu, não um evento
+novo. Cada assinante tem o seu `delivery`.
+
+| Cabeçalho | Conteúdo |
+|---|---|
+| `X-NB-Signature` | `sha256=<HMAC-SHA256 do corpo cru, com o segredo>` (só quando há segredo) |
+| `X-NB-Delivery` | o mesmo `delivery` do corpo (o do corpo é o assinado) |
+| `X-NB-Attempt` | `1`, `2` ou `3` |
+| `X-NB-Event` | o nome do evento |
+| `X-NB-Webhook-Id` | o `id` do webhook que recebeu, quando ele tem um |
+| `User-Agent` | `NutellaBoot3/<versão>` |
 
 Verificação no lado do MOJ:
 
@@ -917,9 +1242,16 @@ def assinatura_confere(corpo: bytes, cabecalho: str, segredo: str) -> bool:
     return hmac.compare_digest(esperado, cabecalho or "")
 ```
 
-A entrega é de melhor esforço: até três tentativas, com espera crescente e
-tempo limite de 5 segundos cada. Um webhook lento nunca segura o boot nem o
-comando de bloqueio — o envio acontece em segundo plano.
+A entrega é de melhor esforço: até três tentativas (espera de 1 s e 2 s entre
+elas), tempo limite de 5 segundos cada, sem seguir redirecionamento. Um webhook
+lento nunca segura o boot nem o comando de bloqueio: o envio acontece em segundo
+plano, com no máximo 8 entregas simultâneas. A entrega que esgota as tentativas
+fica registrada em `webhooks.log` da imagem (evento, `delivery`, host, caminho e
+o último status; nunca o corpo, o segredo ou a query string).
+
+**Liste os eventos que você quer.** `events: []` assina tudo, inclusive
+`machine.status`, que dispara a cada telemetria de cada máquina (dezenas por
+segundo na frota inteira).
 
 ---
 
@@ -933,4 +1265,25 @@ comando de bloqueio — o envio acontece em segundo plano.
 | `404` | imagem, modelo, job ou recurso inexistente |
 | `413` | arquivo grande demais (wallpaper acima de 12 MB, logotipo acima de 2 MB) |
 
-O corpo do erro segue o padrão do FastAPI: `{"detail": "mensagem em português"}`.
+| `429` | muitas tentativas; o cabeçalho `Retry-After` diz em quantos segundos tentar de novo |
+
+O corpo do erro é `{"detail": "mensagem em português", "code": "codigo_estavel"}`.
+**Decida pelo `code`, nunca pelo texto de `detail`** (a frase pode mudar) nem só
+pelo status: um `404` do vínculo pode ser `user_not_in_roster` ou
+`image_not_found`, e são providências diferentes. Erro que não tem código
+próprio leva o padrão do status. O catálogo vivo está em
+`GET /api/v1/events/types` (`error_codes`).
+
+| `code` | Status | Quando |
+|---|---|---|
+| `unauthorized` | 401 | credencial ausente ou inválida |
+| `insufficient_scope` | 403 | a chave de serviço não tem o escopo que a rota pede |
+| `image_out_of_scope` | 403 | a imagem existe, mas está fora dos globs da chave de serviço |
+| `image_not_found` | 404 | a site-image não existe (para o console, também a que é de outro dono) |
+| `user_not_in_roster` | 404 | o `user_id` do vínculo não está no roster da imagem |
+| `invalid_mac` | 400 | MAC fora do formato `aa-bb-cc-dd-ee-ff` |
+| `command_not_allowed` | 400 | comando fora da lista |
+| `command_blocked` | 403 | comando bloqueado pelo cadeado do modelo |
+| `no_target` | 400 | nenhuma máquina alvo, ou `target` malformado |
+| `rate_limited` | 429 | veja `Retry-After` |
+| `bad_request`, `forbidden`, `not_found`, `conflict`, `payload_too_large`, `validation_error` | 400, 403, 404, 409, 413, 422 | os padrões do status, para o erro sem código próprio (`validation_error` traz `detail` como lista) |

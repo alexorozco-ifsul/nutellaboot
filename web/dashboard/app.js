@@ -116,10 +116,12 @@ function medidor(rotulo, pct, texto) {
 
 const KIND_LABEL = {
   "usb.storage": "usb_storage",
+  "identity.duplicate": "identity_duplicate",
   "usb.phone": "usb_phone",
   "usb.network": "usb_network",
   "usb.other": "usb_other",
   "media.cd": "media_cd",
+  "display.multiple": "display_multiple",
 };
 
 function hora(ts) {
@@ -195,7 +197,7 @@ function render() {
         "sede" +
         (s.online === 0 ? " off" : pior > 85 || s.alerts > 0 ? " bad" : pior > 70 ? " warn" : "");
       el.innerHTML = `
-        <span class="sid">${s.id}</span>
+        <span class="sid">${esc(s.id)}</span>
         <span class="son"><b>${s.online}</b>/${s.machines}</span>
         ${s.alerts > 0 ? `<span class="badge">${s.alerts}</span>` : ""}
         ${medidor("RAM", r.mem_avg, r.mem_avg != null ? `${r.mem_avg}%` : "—")}
@@ -279,6 +281,7 @@ async function buscar() {
   try {
     const d = await api.get("/api/v1/labs?dias=1");
     sites = d.sites || [];
+    pintarVisao(d.view);
   } catch (e) {
     $("#updated").textContent = `${t("error")}: ${e.message}`;
     return;
@@ -335,6 +338,21 @@ function rosca(fatias, totalRotulo) {
 // os nomes de editor e de time vêm da TELEMETRIA: quem tem a chave de máquina
 // escreve o que quiser ali, e isto aqui é a tela do admin — nada disso entra
 // no innerHTML sem passar por aqui
+// A visão da frota que o servidor aplicou (services/fleet_views.py). No link
+// compartilhado o servidor não conta o que ficou de fora, e o chip não aparece.
+const MODO_LABEL = { mine: "fview_mine", all: "fview_all", owners: "fview_owners", custom: "fview_custom" };
+
+function pintarVisao(v) {
+  const chip = $("#viewchip");
+  if (!chip) return;
+  if (compartilhado || !v || !v.mode) {
+    chip.hidden = true;
+    return;
+  }
+  chip.hidden = false;
+  chip.textContent = t("fview_chip", { modo: t(MODO_LABEL[v.mode] || "fview_mine"), n: v.shown, total: v.total });
+}
+
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -402,7 +420,7 @@ function renderInventario() {
           const cls = d.pct >= 95 ? "bad" : d.pct >= 85 ? "warn" : "";
           return `<div class="disco-linha${d.online ? "" : " offline"}">
             <span class="dsede">${d.site}</span>
-            <span class="dquem">${d.team || d.mac}</span>
+            <span class="dquem">${esc(d.team || d.mac)}</span>
             <span class="dpct ${cls}">${d.pct}%</span>
             <span class="dsub">${d.free_mb} MB ${t("dash_disk_free")}</span></div>`;
         })
@@ -492,8 +510,8 @@ function renderZoomCabecalho() {
     const linha = document.createElement("div");
     linha.className = "zalerta";
     linha.innerHTML = `<b>${t(KIND_LABEL[a.kind] || "usb_other")}</b>
-      <span>${a.team ? `${a.team} · ` : ""}${a.mac || ""}</span>
-      <span class="dsub">${a.vendor || a.detail || ""}</span>
+      <span>${a.team ? `${esc(a.team)} · ` : ""}${esc(a.mac)}</span>
+      <span class="dsub">${esc(a.vendor || a.detail)}</span>
       <span class="dsub">${hora(a.at)}</span>`;
     az.appendChild(linha);
   }
@@ -527,8 +545,8 @@ async function renderZoomMaquinas() {
     el.className = `zmac ${est}` + ((m.alerts || []).length ? " alerta" : "");
     const nome = m.binding?.name || m.binding?.user_id || m.mac;
     el.innerHTML = `
-      <div class="ztitulo">${m.lock?.locked ? "🔒 " : ""}${nome}</div>
-      <div class="zmacaddr">${m.mac}${est !== "on" ? ` · ${t(est === "stale" ? "stale" : "offline")}` : ""}</div>
+      <div class="ztitulo">${m.lock?.locked ? "🔒 " : ""}${esc(nome)}</div>
+      <div class="zmacaddr">${esc(m.mac)}${est !== "on" ? ` · ${t(est === "stale" ? "stale" : "offline")}` : ""}</div>
       ${medidor("RAM", res.mem_pct, res.mem_pct != null ? `${res.mem_pct}%` : "—")}
       ${medidor("CPU", cpu, cpu != null ? `${cpu}%` : "—")}
       ${medidor("swap", (res.swap_used_mb || 0) > 0 ? 100 : 0, res.swap_used_mb ? `${res.swap_used_mb}M` : "0")}

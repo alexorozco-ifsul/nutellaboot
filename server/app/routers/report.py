@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .. import auth
+from ..errors import erro
 from ..services import report, store
 
 router = APIRouter(prefix="/api/v1")
@@ -32,10 +33,15 @@ async def relatorio(
     tk: str = Query(""),
 ):
     p = auth.principal_de_link(request, tk, image)
+    if p is not None and p.kind == "service" and not p.can_see_image(image):
+        raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
     if p is None or not p.can_see_image(image):
-        raise HTTPException(401, "credencial ausente ou inválida")
+        raise erro(401, "unauthorized", "credencial ausente ou inválida")
+    if p.kind == "service" and "machines:read" not in p.scopes:
+        # o relatório é a telemetria inteira: mesma exigência do GET machines
+        raise erro(403, "insufficient_scope", "escopo insuficiente")
     if not store.site_image_exists(image):
-        raise HTTPException(404, "imagem não existe")
+        raise erro(404, "image_not_found", "imagem não existe")
 
     agora = time.time()
     until = until or agora

@@ -21,12 +21,15 @@ sem_squashfs = pytest.mark.skipif(
 )
 
 
-def rodar(*args: str, esperar_ok: bool = True) -> subprocess.CompletedProcess:
+def rodar(*args: str, esperar_ok: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
+    import os
+
     r = subprocess.run(
         ["python3", str(FERRAMENTA), *args],
         capture_output=True,
         text=True,
         timeout=180,
+        env={**os.environ, **(env or {})},
     )
     if esperar_ok:
         assert r.returncode == 0, r.stderr or r.stdout
@@ -140,6 +143,30 @@ def test_nome_muda_quando_o_conteudo_muda(tmp_path, monkeypatch):
     assert primeiro in nomes
 
 
+@sem_squashfs
+def test_o_nome_leva_a_hora_de_brasilia(tmp_path):
+    """Duas camadas do mesmo dia (uma por modelo) só se distinguiam pelo hash.
+    A hora vai no nome, no fuso de quem escolhe no /admin/, e não no do
+    servidor: a produção roda em UTC."""
+    import re
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    fuso = ZoneInfo("America/Sao_Paulo")
+    antes = datetime.now(fuso)
+    rodar("--out", str(tmp_path), env={"TZ": "UTC"})
+    depois = datetime.now(fuso)
+    nome = next(tmp_path.glob("telemetria-*.squash")).name
+    m = re.fullmatch(r"telemetria-(\d{4}-\d{2}-\d{2}-\d{4})-[0-9a-f]{6}\.squash", nome)
+    assert m, nome
+    validos = set()
+    t = antes.replace(second=0, microsecond=0)
+    while t <= depois:
+        validos.add(t.strftime("%Y-%m-%d-%H%M"))
+        t += timedelta(minutes=1)
+    assert m.group(1) in validos, (nome, validos)
+
+
 def test_recusa_arvore_incompleta(tmp_path, monkeypatch):
     """Sem o agente a camada não serve para nada, e o erro tem que aparecer
     aqui e não no boot de 40 máquinas."""
@@ -175,6 +202,82 @@ def test_a_troca_da_telemetria_casa_por_papel():
     assert '"telemetry"' in texto
 
 
+def _modelo(data_root, nome: str, dono: str, camadas: list[dict]) -> None:
+    from server.app import fsdb
+    from server.app.services.default_schema import build_default_schema
+
+    fsdb.write_json(data_root / "models" / nome / "schema.json", build_default_schema())
+    fsdb.write_json(
+        data_root / "models" / nome / "model.json",
+        {"name": nome, "owner": dono, "layers": camadas},
+    )
+
+
+def _camadas(data_root, nome: str) -> list[dict]:
+    from server.app import fsdb
+
+    return fsdb.read_json(data_root / "models" / nome / "model.json")["layers"]
+
+
+@sem_squashfs
+def test_all_models_troca_todos_com_uma_camada_so(servidor, data_root):
+    """Um squash por --model era o mesmo conteúdo com md5 diferente (duas
+    "telemetria" do mesmo dia no catálogo), e modelo não citado ficava para
+    trás: o do sub-admin do Chile, copiado do modelo da temporada, continuou
+    com a tela de bloqueio quebrada depois do conserto. --all-models gera UMA
+    camada e a põe em todo modelo que já tem telemetria."""
+    base, chave = servidor
+    velha = {"file": "telemetria-2026-09-21-a5ee80.squash", "md5": "a" * 32, "role": "telemetry"}
+    raiz = {"file": "maratonalinux2026.squash", "md5": "c" * 32, "role": "base"}
+    _modelo(data_root, "temporada", "admin", [dict(velha), dict(raiz)])
+    _modelo(data_root, "do-chile", "invite:NB3-AAAA-BBBB-CCCC", [dict(velha), dict(raiz)])
+    _modelo(data_root, "so-base", "admin", [dict(raiz)])
+
+    r = rodar(
+        "--all-models", "--out", str(data_root / "blobs"),
+        env={"NB3_BASE_URL": base, "NB3_ADMIN_KEY": chave},
+    )
+    novas = [p.name for p in (data_root / "blobs").glob("telemetria-*.squash")]
+    assert len(novas) == 1, novas
+    for nome in ("temporada", "do-chile"):
+        camadas = _camadas(data_root, nome)
+        assert camadas[0]["file"] == novas[0] and camadas[0]["role"] == "telemetry", camadas
+        assert [c["role"] for c in camadas].count("telemetry") == 1, camadas
+        assert camadas[-1]["file"] == raiz["file"]
+    assert _camadas(data_root, "so-base") == [raiz]
+    assert "so-base" in r.stdout
+
+
+@sem_squashfs
+def test_model_repetido_tambem_gera_uma_camada_so(servidor, data_root):
+    base, chave = servidor
+    raiz = {"file": "maratonalinux2026.squash", "md5": "c" * 32, "role": "base"}
+    _modelo(data_root, "a", "admin", [dict(raiz)])
+    _modelo(data_root, "b", "admin", [dict(raiz)])
+    rodar(
+        "--model", "a", "--model", "b", "--model", "a", "--out", str(data_root / "blobs"),
+        env={"NB3_BASE_URL": base, "NB3_ADMIN_KEY": chave},
+    )
+    novas = [p.name for p in (data_root / "blobs").glob("telemetria-*.squash")]
+    assert len(novas) == 1, novas
+    assert _camadas(data_root, "a")[0]["file"] == _camadas(data_root, "b")[0]["file"] == novas[0]
+    assert [c["file"] for c in _camadas(data_root, "a")].count(novas[0]) == 1
+
+
+@sem_squashfs
+def test_dry_run_com_all_models_so_lista(servidor, data_root):
+    base, chave = servidor
+    velha = {"file": "telemetria-2026-09-21-a5ee80.squash", "md5": "a" * 32, "role": "telemetry"}
+    _modelo(data_root, "temporada", "admin", [dict(velha)])
+    r = rodar(
+        "--dry-run", "--all-models", "--out", str(data_root / "blobs"),
+        env={"NB3_BASE_URL": base, "NB3_ADMIN_KEY": chave},
+    )
+    assert "iria para: temporada" in r.stdout
+    assert not list((data_root / "blobs").glob("telemetria-*.squash"))
+    assert _camadas(data_root, "temporada") == [velha]
+
+
 def test_a_parte_de_disco_emite_json_valido(tmp_path):
     """O 25-disco roda DE VERDADE contra um diretório qualquer: o fragmento
     tem que ser JSON válido (dentro de chaves) com os campos do /home. É a
@@ -197,3 +300,212 @@ def test_a_parte_de_disco_emite_json_valido(tmp_path):
     for campo in ("home_used_mb", "home_free_mb", "home_pct", "root_free_mb"):
         assert campo in disco, f"faltou {campo}"
     assert 0 <= disco["home_pct"] <= 100
+
+
+# --- os coletores novos: pressão, OOM, ociosidade, hardware, relógio ---------
+#
+# Rodam DE VERDADE contra arquivos falsos (variáveis NB_*), como o 25-disco.
+# Tudo que não dá para medir fica AUSENTE: o servidor trata como opcional.
+
+PARTS = REPO / "client" / "telemetry" / "usr" / "share" / "mlog" / "parts.d"
+
+
+def _parte(nome, tmp_path, **env):
+    import json
+    import os
+    import subprocess
+
+    r = subprocess.run(
+        ["bash", str(PARTS / nome)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **{k: str(v) for k, v in env.items()}},
+        timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    return json.loads("{" + r.stdout + "}")
+
+
+def test_a_parte_de_recursos_le_psi_oom_e_ociosidade(tmp_path):
+    pressure = tmp_path / "pressure"
+    pressure.mkdir()
+    for nome, avg in (("memory", "1.25"), ("cpu", "0.10"), ("io", "3.50")):
+        (pressure / nome).write_text(
+            f"some avg10=0.00 avg60={avg} avg300=0.50 total=123\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+        )
+    (tmp_path / "vmstat").write_text("nr_free_pages 1\noom_kill 3\n")
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    (fakebin / "runuser").write_text("#!/bin/sh\necho '(uint64 42000,)'\n")
+    (fakebin / "runuser").chmod(0o755)
+    import os
+
+    res = _parte(
+        "20-recursos.sh",
+        tmp_path,
+        NB_PROC_PRESSURE=pressure,
+        NB_PROC_VMSTAT=tmp_path / "vmstat",
+        PATH=f"{fakebin}:{os.environ['PATH']}",
+    )["sysresources"]
+    assert res["psi_mem"] == 1.25 and res["psi_cpu"] == 0.1 and res["psi_io"] == 3.5
+    assert res["oom_kills"] == 3
+    assert res["idle_s"] == 42
+    for campo in ("mem_pct", "swap_used_mb", "loadavg", "alerts"):
+        assert campo in res
+
+
+def test_sem_psi_os_campos_ficam_ausentes(tmp_path):
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    for nome in ("runuser", "loginctl"):
+        (fakebin / nome).write_text("#!/bin/sh\nexit 1\n")
+        (fakebin / nome).chmod(0o755)
+    res = _parte(
+        "20-recursos.sh",
+        tmp_path,
+        NB_PROC_PRESSURE=tmp_path / "nao-existe",
+        NB_PROC_VMSTAT=tmp_path / "nao-existe",
+        PATH=f"{fakebin}:/usr/bin:/bin",
+    )["sysresources"]
+    for campo in ("psi_mem", "psi_cpu", "psi_io", "oom_kills", "idle_s"):
+        assert campo not in res, campo
+
+
+def test_a_parte_de_hardware_leva_mac_dmi_e_uptime(tmp_path):
+    import time
+
+    dmi = tmp_path / "dmi"
+    dmi.mkdir()
+    (dmi / "product_uuid").write_text("4C4C4544-0042-3010-8034-B4C04F4B4E31\n")
+    (dmi / "product_name").write_text("OptiPlex 3090\n")
+    (dmi / "sys_vendor").write_text("Dell Inc.\n")
+    (tmp_path / "uptime").write_text("1234.56 4000.00\n")
+    (tmp_path / "mac").write_text("58-11-22-99-fc-6a\n")
+    hw = _parte(
+        "10-hardware.sh",
+        tmp_path,
+        NB_DMI_DIR=dmi,
+        NB_PROC_UPTIME=tmp_path / "uptime",
+        NB_MAC_ARQ=tmp_path / "mac",
+    )["hwinfo"]
+    assert hw["mac"] == "58-11-22-99-fc-6a"
+    assert hw["dmi_uuid"] == "4c4c4544-0042-3010-8034-b4c04f4b4e31"
+    assert hw["product_name"] == "OptiPlex 3090" and hw["product_vendor"] == "Dell Inc."
+    assert hw["uptime_s"] == 1234
+    assert abs(hw["last_boot"] - (time.time() - 1234)) < 3
+    assert hw["hostname"]
+    for campo in ("processor", "cores", "memtotal_mb"):
+        assert campo in hw
+
+
+def test_hardware_sem_os_arquivos_novos_nao_inventa_campo(tmp_path):
+    hw = _parte(
+        "10-hardware.sh",
+        tmp_path,
+        NB_DMI_DIR=tmp_path / "nao",
+        NB_PROC_UPTIME=tmp_path / "nao",
+        NB_MAC_ARQ=tmp_path / "nao",
+    )["hwinfo"]
+    for campo in ("mac", "dmi_uuid", "product_name", "uptime_s", "last_boot"):
+        assert campo not in hw, campo
+
+
+def test_o_relogio_do_agente_e_chave_de_topo(tmp_path):
+    import time
+
+    d = _parte("05-relogio.sh", tmp_path)
+    assert abs(d["t_agent"] - time.time()) < 3
+
+
+def test_o_status_inteiro_e_json_valido_com_o_relogio_no_topo(tmp_path):
+    """O collect() concatena as partes com vírgula e envolve em chaves: uma
+    parte que imprima uma chave escalar entra no topo sem mudar o agente."""
+    import json
+    import os
+    import subprocess
+
+    saidas = []
+    for parte in sorted(PARTS.glob("*.sh")):
+        r = subprocess.run(
+            ["bash", str(parte)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "NB_PROC_PRESSURE": str(tmp_path / "nao"), "NB_DMI_DIR": str(tmp_path / "nao"),
+                 "NB_DISCO_HOME": str(tmp_path), "NB_DISCO_ROOT": str(tmp_path),
+                 "NB_EDITORES_ARQ": str(tmp_path / "nao")},
+            timeout=60,
+        )
+        assert r.returncode == 0, (parte.name, r.stderr)
+        saidas.append(r.stdout.strip())
+    status = json.loads("{" + ",".join(saidas) + "}")
+    assert isinstance(status["t_agent"], int)
+    for bloco in ("hwinfo", "sysresources", "sysdisk", "operations"):
+        assert bloco in status
+    assert "editors_time_since" in status["operations"]
+
+
+def test_o_agente_diz_a_versao_e_o_que_sabe_medir(tmp_path):
+    """A frota é mista (a camada chega por sede). O MOJ adivinhava o agente
+    novo pela presença de `t_agent`; agora o agente se declara."""
+    mac = tmp_path / "mac-icpc"
+    mac.write_text("52-54-00-12-34-56\n")
+    d = _parte("00-agente.sh", tmp_path, NB_AGENTE_DIR=PARTS.parent, NB_MAC_ARQ=mac)
+    assert d["agent_version"] == (PARTS.parent / "VERSION").read_text().strip() != ""
+    assert d["capabilities"] == ["psi", "oom", "idle", "skew", "editors_since", "monitors", "ua_mac"]
+
+    sem = _parte("00-agente.sh", tmp_path, NB_AGENTE_DIR=PARTS.parent, NB_MAC_ARQ=tmp_path / "nao")
+    assert "ua_mac" not in sem["capabilities"]
+    # sem o arquivo de versão a parte ainda imprime: uma parte vazia no começo
+    # quebraria o JSON do status inteiro
+    assert _parte("00-agente.sh", tmp_path, NB_AGENTE_DIR=tmp_path)["agent_version"] == ""
+
+
+def test_cada_capacidade_anunciada_tem_quem_a_produza():
+    """Anunciar o que nenhuma parte emite é mentir para quem integra."""
+    produtor = {
+        "psi": ("20-recursos.sh", "psi_mem"),
+        "oom": ("20-recursos.sh", "oom_kills"),
+        "idle": ("20-recursos.sh", "idle_s"),
+        "skew": ("05-relogio.sh", "t_agent"),
+        "editors_since": ("30-operacoes.sh", "editors_time_since"),
+        "monitors": ("10-hardware.sh", '"monitors"'),
+    }
+    anunciadas = (PARTS / "00-agente.sh").read_text(encoding="utf-8")
+    for cap, (arquivo, literal) in produtor.items():
+        assert f'"{cap}"' in anunciadas
+        assert literal in (PARTS / arquivo).read_text(encoding="utf-8"), (cap, arquivo)
+
+
+def test_o_servidor_devolve_a_versao_do_agente(client, image_testes3):
+    hm = {"X-NB-Machine-Key": image_testes3["machine_key"]}
+    hi = {"Authorization": f"Bearer {image_testes3['token']}"}
+    base = "/api/v1/site-images/testes3/machines"
+    client.post(f"{base}/52-54-00-12-34-56/status",
+                json={"agent_version": "2026.09.2", "capabilities": ["psi", "oom"], "t_agent": 1}, headers=hm)
+    st = client.get(base, headers=hi).json()["machines"][0]["status"]
+    assert st["agent_version"] == "2026.09.2" and st["capabilities"] == ["psi", "oom"]
+
+
+def _drm(tmp_path, conectores):
+    drm = tmp_path / "drm"
+    for nome, status, enabled in conectores:
+        d = drm / nome
+        d.mkdir(parents=True)
+        (d / "status").write_text(status + "\n")
+        (d / "enabled").write_text(enabled + "\n")
+    (drm / "card1").mkdir(parents=True, exist_ok=True)  # o nó da placa não é conector
+    return drm
+
+
+def test_o_hardware_conta_os_monitores_acesos(tmp_path):
+    drm = _drm(tmp_path, [
+        ("card1-DP-1", "connected", "enabled"),
+        ("card1-HDMI-A-1", "connected", "enabled"),
+        ("card1-eDP-1", "connected", "disabled"),     # notebook com a tampa fechada
+        ("card1-Writeback-1", "unknown", "disabled"),
+        ("card1-DP-2", "disconnected", "disabled"),
+    ])
+    hw = _parte("10-hardware.sh", tmp_path, NB_SYSFS_DRM=drm)["hwinfo"]
+    assert hw["monitors"] == 2 and hw["monitor_outputs"] == ["DP-1", "HDMI-A-1"]
+    sem = _parte("10-hardware.sh", tmp_path, NB_SYSFS_DRM=tmp_path / "nao")["hwinfo"]
+    assert "monitors" not in sem and "monitor_outputs" not in sem

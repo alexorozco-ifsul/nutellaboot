@@ -29,10 +29,12 @@ function imageToken() {
 const CONSOLE_HEADER = { "X-NB-Console": "1" };
 
 export class ApiError extends Error {
-  constructor(status, detail) {
-    super(detail || `HTTP ${status}`);
+  constructor(status, detail, code) {
+    super(typeof detail === "string" && detail ? detail : `HTTP ${status}`);
     this.status = status;
     this.detail = detail;
+    // o código estável do erro (docs/api.md): é por ele que a tela decide
+    this.code = code || "";
   }
 }
 
@@ -46,12 +48,12 @@ async function parse(resp) {
     body = text;
   }
   if (!resp.ok) {
-    throw new ApiError(resp.status, body && body.detail ? body.detail : String(body));
+    throw new ApiError(resp.status, body && body.detail ? body.detail : String(body), body && body.code);
   }
   return body;
 }
 
-export async function request(method, path, { body, kind = "image", raw, contentType, token } = {}) {
+export async function request(method, path, { body, kind = "image", raw, contentType, token, signal } = {}) {
   const headers = { ...CONSOLE_HEADER };
   // no console a credencial é o cookie; nas telas de sede, o token da URL.
   // `token` é para quem tem o token em mãos mas não na URL — a tela de
@@ -61,7 +63,8 @@ export async function request(method, path, { body, kind = "image", raw, content
   } else if (kind !== "admin" && imageToken()) {
     headers.Authorization = `Bearer ${imageToken()}`;
   }
-  const opts = { method, headers, credentials: "same-origin" };
+  // `signal`: a vista do console que saiu da tela cancela o que pediu
+  const opts = { method, headers, credentials: "same-origin", signal };
   if (raw) {
     opts.body = raw;
     if (contentType) opts.headers["Content-Type"] = contentType;
@@ -86,6 +89,12 @@ export async function login(key) {
 
 export async function logout(todos = false) {
   return del(`/api/v1/session${todos ? "?all=true" : ""}`, { kind: "admin" });
+}
+
+// Quem está logado nesta sessão (401 sem sessão). Mesmo cabeçalho de console
+// das outras chamadas: o cookie só vale com ele.
+export async function session() {
+  return get("/api/v1/session", { kind: "admin" });
 }
 
 export function wallpaperUrl(image, versao) {
@@ -140,6 +149,35 @@ export function reportUrl(image, since, until, lang) {
   const tk = imageToken();
   if (tk) q.set("tk", tk);
   return `/api/v1/site-images/${encodeURIComponent(image)}/report?${q}`;
+}
+
+export function rosterLogoUrl(image, org, versao) {
+  // <img> não manda cabeçalho: token na URL, como o wallpaper
+  const q = new URLSearchParams();
+  if (versao) q.set("v", versao);
+  const tk = imageToken();
+  if (tk) q.set("tk", tk);
+  const s = q.toString();
+  return `/api/v1/site-images/${encodeURIComponent(image)}/roster/logos/${encodeURIComponent(org)}${s ? `?${s}` : ""}`;
+}
+
+// NDJSON (o lote de samples): uma linha por máquina. O `parse()` de sempre
+// tentaria um JSON.parse do texto inteiro.
+export async function ndjson(path, o = {}) {
+  const headers = { ...CONSOLE_HEADER };
+  if (o.kind !== "admin" && imageToken()) headers.Authorization = `Bearer ${imageToken()}`;
+  const resp = await fetch(path, { headers, credentials: "same-origin" });
+  const texto = await resp.text();
+  if (!resp.ok) {
+    let corpo;
+    try {
+      corpo = JSON.parse(texto);
+    } catch {
+      corpo = null;
+    }
+    throw new ApiError(resp.status, corpo && corpo.detail ? corpo.detail : texto, corpo && corpo.code);
+  }
+  return texto.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
 }
 
 // A tela irmã da sede: do configureitor para o hotconfig e vice-versa.

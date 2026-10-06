@@ -9,6 +9,7 @@
 
 import * as api from "/common/api.js";
 import { t } from "/common/i18n.js";
+import { esc } from "/common/ui.js";
 
 const RECARGA_MS = 4000;
 
@@ -52,10 +53,14 @@ function motivoDesatualizada(razoes) {
 }
 
 // `token` é para quem tem o token em mãos mas não na URL (a tela de criação).
-export function usbBlock(imageId, token = "") {
+// `sinal`: quando a página do console que mostra o bloco sai da tela, a
+// sondagem de 4 s para junto (senão continuava batendo no servidor para sempre).
+// `semTitulo`: dentro de uma seção que já tem título (a página da imagem).
+export function usbBlock(imageId, token = "", { sinal, semTitulo = false } = {}) {
   const caixa = document.createElement("div");
   caixa.className = "usb";
   let timer = null;
+  if (sinal) sinal.addEventListener("abort", () => clearTimeout(timer));
 
   async function carregar() {
     let dados;
@@ -65,21 +70,24 @@ export function usbBlock(imageId, token = "") {
       // quando não existe (console). Com `kind: "admin"` ele NÃO mandava o
       // token da URL, e o configureitor — que se autentica só por `?tk=` —
       // recebia 401 e ficava sem o bloco do pendrive inteiro.
-      dados = await api.get(`/api/v1/site-images/${encodeURIComponent(imageId)}/usb`, { token });
+      dados = await api.get(`/api/v1/site-images/${encodeURIComponent(imageId)}/usb`, { token, signal: sinal });
     } catch (e) {
-      caixa.innerHTML = `<p class="muted">${t("usb_title")}: ${e.message}</p>`;
+      if (sinal && sinal.aborted) return;
+      caixa.innerHTML = `<p class="muted">${t("usb_title")}: ${esc(e.message)}</p>`;
       return;
     }
     desenhar(dados);
   }
 
   function desenhar(d) {
-    caixa.innerHTML = `<h3>${t("usb_title")}</h3><p class="help muted">${t("usb_help")}</p>`;
+    caixa.innerHTML = semTitulo
+      ? `<p class="help muted">${t("usb_help")}</p>`
+      : `<h3>${t("usb_title")}</h3><p class="help muted">${t("usb_help")}</p>`;
 
     if (!d.kernel.ok) {
       const aviso = document.createElement("p");
-      aviso.className = "warn";
-      aviso.innerHTML = `${t("usb_no_kernel")}<br><code>${d.kernel.hint}</code>`;
+      aviso.className = "msg warn";
+      aviso.innerHTML = `${t("usb_no_kernel")}<br><code>${esc(d.kernel.hint)}</code>`;
       caixa.appendChild(aviso);
       return;
     }
@@ -156,7 +164,7 @@ export function usbBlock(imageId, token = "") {
 
     if (i.status === "done" && i.stale) {
       const aviso = document.createElement("p");
-      aviso.className = "warn";
+      aviso.className = "msg warn";
       aviso.textContent = motivoDesatualizada(i.stale_reason || []);
       caixa.appendChild(aviso);
     }
@@ -187,6 +195,7 @@ export function usbBlock(imageId, token = "") {
 
     // enquanto está gerando, volta a perguntar; parado, não bate no servidor
     clearTimeout(timer);
+    if (sinal && sinal.aborted) return;
     if (i.status === "building" || d.generic.status === "building") {
       timer = setTimeout(carregar, RECARGA_MS);
     }

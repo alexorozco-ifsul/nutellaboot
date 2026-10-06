@@ -50,7 +50,11 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
 
 9. **O pendrive é liberado cedo.** O initrd copia a configuração para a RAM e
    desmonta antes de qualquer coisa de rede, avisando na tela. Não adicione
-   leituras do pendrive depois desse ponto.
+   leituras do pendrive depois desse ponto. No boot pela rede não há pendrive:
+   o carregador (iPXE) põe o conf dentro do initrd, em `/nutellaboot.conf`; o
+   initrd não procura a NB3CFG e marca `NB_NETBOOT`, que faz o
+   `25-usbupdate.sh` avisar em vez de regravar. Quem liga `NB_NETBOOT` é o
+   arquivo, nunca a cmdline. Há teste.
 
 10. **`/api/v1/images/...` continua respondendo, para sempre.** O agente de
     telemetria (`client/telemetry/usr/share/mlog/agent.sh`) monta
@@ -111,7 +115,15 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     exceções são `GET` puro que um `<img>`/`EventSource` precisa carregar
     (SSE e prévia do wallpaper), que aceitam `?tk=` ou o cookie sem o
     cabeçalho. Há teste (`tests/test_session.py`,
-    `tests/test_layer_builds_console.py`).
+    `tests/test_layer_builds_console.py`). **O gerenciador de senhas do
+    navegador é o lugar certo para a chave** — não é storage da página: o
+    `<form>` da home e do `/admin/` tem `autocomplete=username` +
+    `current-password` e `<button type=submit>` para isso; nunca volte a pôr
+    `autocomplete=off` no campo de chave (era o que fazia "a chave nunca ser
+    lembrada"). A sessão desliza: renovação em disco + reemissão do cookie só
+    em requisição de console (`auth.principal` → `SessionCookieMiddleware`),
+    no máximo uma vez por dia — renovar só no disco não adianta, o navegador
+    apaga o cookie no fim do Max-Age original.
 
 15. **Ferramenta que fala com a API tem que falhar alto.** O
     `nb3-gerar-squash` usava `curl -sS` sem `--fail`: um 404 (nome de modelo
@@ -128,15 +140,32 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     variável de laço que `nb_fatal_screen` usava para o tempo de espera, e o
     resultado era `sleep RAM` — a tela sumia antes de alguém ler. Há teste.
 
-17. **O alerta de dispositivo fica até alguém dispensar.** Não some quando o
-    pendrive é removido, e a chave de máquina **não** dispensa alerta —
-    adulterar o agente não pode apagar o rastro. Está em
-    `services/alerts.py`, com teste.
+17. **O alerta de dispositivo fica até alguém dispensar — e é de MUDANÇA de
+    estado.** Não some quando o pendrive é removido, e a chave de máquina
+    **não** dispensa alerta — adulterar o agente não pode apagar o rastro.
+    Mas o que já estava conectado no boot não alarma (o agente descarta a
+    fila do coldplug ao subir; não há mais "varredura de presente no boot"),
+    a regra de udev só olha nós com `ID_FS_USAGE` (no nó do disco inteiro a
+    label `NB3CFG` da partição ainda não estava no udev durante o boot — o
+    pendrive de boot alarmava a cada ligada, e a faixa virou ruído na
+    Maratona 2026), e alerta igual ainda aberto não repete (`repeated`).
+    Está em `services/alerts.py`, com teste. **Exceção declarada:
+    `display.multiple`** (mais monitores acesos que `MAXMONITORS`) alarma
+    também no boot — a regra do boot existe por causa do pendrive de boot, e
+    um segundo monitor já ligado é justamente o caso. Conta só saída
+    `connected` + `enabled` (o eDP de notebook com a tampa fechada não) e
+    exige duas leituras seguidas (`monitores_tick` no agente).
 
-18. **O código de convite nunca é gravado dentro da site-image.** Ele é a
-    credencial do console de sub-admin; se ficasse no `image.json`, quem
-    tivesse só o token da imagem escalaria para sub-admin. O que fica gravado
-    é `owner` (`"admin"` ou `"invite:<CÓDIGO>"`). Há teste.
+18. **O código de convite nunca sai para quem não é o console dono.** Ele é a
+    credencial do console de sub-admin, e o `owner` gravado no `image.json` (e
+    no `model.json`) é `"invite:<CÓDIGO>"`: **o `owner` cru É a credencial**.
+    Por meses `GET /site-images/{img}` devolveu o `image.json` inteiro ao token
+    da sede (o hotconfig lê essa rota) e o teste só conferia que não havia uma
+    chave chamada `invite`. Toda rota que devolve imagem ou modelo a quem não
+    é admin nem o próprio dono passa por `ownership.site_image_para` /
+    `ownership.owner_publico` (`owner_kind`, `owner_label`, `owner_ref`). O
+    teste (`tests/test_owner_leak.py`) confere pelo VALOR, varrendo os GET que
+    o token alcança. Rota nova que devolva `owner`: passe pelo mesmo funil.
 
 19. **O boot REGRAVA o pendrive da sede quando ele está para trás**, e por isso
     `client/stuff/25-usbupdate.sh` é o arquivo mais perigoso do projeto: errar
@@ -181,6 +210,9 @@ O nome antigo era *template*/*image*; a migração está em
   regra de udev) empacotado por `tools/nb3-camada-telemetria`, que também
   publica e registra no modelo — removendo a anterior, senão duas versões do
   agente disputam o mesmo caminho e a primeira da lista vence em silêncio.
+  Use `--all-models`: o modelo de sub-admin é cópia do da temporada e leva a
+  telemetria daquele dia. Citar só o modelo da temporada deixou o do Chile
+  com a tela de bloqueio quebrada depois do conserto.
 
 ## Credenciais
 
@@ -203,7 +235,7 @@ o primeiro. Rota nova de console usa `require_console` + as funções de
 ```bash
 tools/nb3-init                     # instalação nova: emite e IMPRIME a chave
 tools/nb3-dev                      # servidor em 127.0.0.1:8890
-.venv/bin/python -m pytest -q      # 520 testes, ~42 s
+.venv/bin/python -m pytest -q      # 1264 testes, ~3 min
 tools/nb3-seed-testdata            # dados de teste (não é instalação)
 tools/nb3-layer-worker --check     # confere as ferramentas rootless
 ```
@@ -304,6 +336,195 @@ O ambiente de teste tem um nginx externo que faz proxy de
   sem os canários (`so-a0-hr-b0`, `ty-a0-gf-a0`, `QuZ-a0-hr-b0`), e sem rádio
   com `wifi.conf` preenchido o boot interroga o dmesg e nomeia o firmware
   ausente na tela.
+- **O padrão embutido de servidor era o host do NutellaBoot 2, e a chave de
+  boot só vive na partição do pendrive.** Um SATA morrendo prendeu o
+  `blkid -L NB3CFG` por 33 s, a partição não foi lida em 10 s de tentativas,
+  e o boot seguiu com `IMAGEROOT` da cmdline, servidor do nb2 e chave VAZIA —
+  dez tentativas de rede e uma tela `NO NETWORK` mandando procurar cabo.
+  Hoje: padrão = `NB3_BASE_URL` do `systemd/nutellaboot3.service` (há teste
+  cruzando os dois); `/dev/disk/by-label/NB3CFG` antes do `blkid` (o link
+  nasce do evento do próprio pendrive), 20×2 s; `NB_SERVER` também na cmdline
+  do GRUB (`nb3-genusb`), a chave nunca; e sem `nutellaboot.conf` ou sem
+  `NB_BOOT_KEY` o boot para na tela `NO CONF` com a causa. Precedência:
+  cmdline > conf > padrão, para o servidor como para a sede.
+- **A chave da máquina é o MAC ESTÁVEL de `/etc/mac-icpc`, não o da
+  interface de boot.** O initrd escolhe (`client/stuff/10-identidade.sh`:
+  cabeada interna > wifi interna > `BOOTIF` > qualquer física, nunca USB se
+  houver outra) e grava o arquivo; o agente e a tela de bloqueio o leem, com
+  `BOOTIF`/detecção só de reserva para initrd antigo. Antes a mesma máquina
+  bootando por cabo, wifi e USB virava três, e sem `BOOTIF` a tela nem
+  consultava o `lockstate`. O `/etc/machine-id` é `md5(MAC)` e é
+  **sobrescrito a cada boot de propósito** — não "corrija" para preservar o
+  antigo: era o id herdado da home clonada que o MOJ viu duplicado em 62
+  grupos. O user-agent tem QUATRO campos (`MLinux/<img>/<mid>/<bid>/<mac>`,
+  o MAC no fim); quem lê por posição não pode assumir três. Campos novos de
+  telemetria (`t_agent`, PSI, `hwinfo.mac`…) são OPCIONAIS nos dois lados: a
+  frota é heterogênea e um agente antigo continua válido (invariante 10).
+- **O `/run` do initrd vai inteiro para o sistema montado** (`mount -n -o
+  move /run ${rootmnt}/run` no `/init` do initramfs-tools). A cópia do
+  `nutellaboot.conf` em `/run/nutellaboot` chegava ao sistema da prova com a
+  chave de boot em 644, ao lado do `/etc/.nb3` em 600 que existe justamente
+  para ninguém lê-la; o `wifi.conf` ia junto com as senhas. O initrd apaga o
+  conf assim que o lê e o stuff apaga os dois no fim (`nb3_limpa_run`, que
+  cobre initrd antigo). Arquivo com segredo no initrd: `/tmp` ou apagar antes
+  do fim, nunca largar em `/run`. Há teste.
+- **`truncated` das séries vem de `samples.meta.json`, não do tamanho do
+  arquivo.** O `append_capped` corta para a METADE do teto, então um limiar
+  de "90% do teto" dizia `false` por dias com histórico comprovadamente
+  descartado; e o downsample `int(i*passo)` nunca alcançava o último ponto.
+  O reamostrador é `reamostrar()` (primeiro e último sempre) e a resposta
+  diz o que fez (`resampled`, `native_points`, `interval_s`) — sem isso o
+  MOJ concluiu que o agente mandava a cada 2 min quando era o passo do
+  reamostrador.
+- **`POST …/commands` sem `target` é a sala inteira**, e o `nb3-api command`
+  mandou as máquinas em `macs` (campo que o servidor nunca leu) por meses:
+  `command <sede> mlpoweroff <mac>` desligava a sala. O teste comparava só os
+  CAMINHOS da ferramenta com o OpenAPI, nunca o corpo. Hoje o servidor recusa
+  (400) corpo com `macs`/`mac`/`targets` sem `target`, a ferramenta exige
+  `--all` por extenso, e `tests/test_cli_api.py` confere o EFEITO (a fila de
+  cada máquina). Subcomando destrutivo novo: teste o efeito, não a rota.
+- **A rota da sede inteira (`/site-images/{sede}/lock` e `/unlock`) recusa
+  corpo com lista de máquinas.** A tela da frota postava ali as sedes em que
+  só ALGUMAS máquinas estavam marcadas: a confirmação dizia "3 máquinas" e a
+  sala inteira travava. Hoje a frota manda a lista por `/machines/{mac}/{cmd}`,
+  e a rota da sede devolve 400 `no_target` para `target` diferente de `"all"`,
+  `targets`, `macs`, `mac` ou `machines`. Há teste do efeito
+  (`tests/test_commands.py`).
+- **Remendo de pacote da base em tempo de boot confere o texto da camada
+  PUBLICADA, não o histórico do git.** O `30-firewall.sh` troca o script do
+  `maratona-firewall` quando reconhece o filtro defeituoso do `/etc/hosts`. O
+  gatilho procurava o `egrep -v` do commit que o pacote tinha no git, e a base
+  publicada vinha com a versão seguinte, escrita com `grep --invert-match`: a
+  troca nunca disparou numa máquina, e o teste passava contra um script que
+  não existia na base. O texto real está em `tests/fixtures/` (tirado com
+  `unsquashfs -cat` da camada), o texto embutido é idêntico ao arquivo do
+  pacote, e há teste de que ele não dispara o próprio gatilho.
+- **Texto de fora não entra cru em `innerHTML`.** O pedido de imagem do
+  formulário PÚBLICO (`wanted_name`, `contact`, `note`) era interpolado na
+  tela do admin: um anônimo rodava script na sessão que gere as chaves. Nome
+  de sede, time do roster, `vendor`/`detail` de alerta e o status da máquina
+  são a mesma coisa. Use `esc()` de `web/common/ui.js` (ou `textContent`);
+  `tests/test_web_js.py` acusa template com marcação que interpola esses
+  campos sem `esc(`. Ele não enxerga template ANINHADO: confira à mão.
+- O no-undef caseiro de `tests/test_web_js.py` lia a flag de regex (`/x/g`)
+  como identificador; só passava onde a tela declarava um `g` por acaso.
+  Hoje as flags são apagadas junto com a regex.
+- **Evento se publica por `services/eventos.publicar`, e nunca segurando
+  `fsdb.locked`.** Havia cinco cópias de `notify.publish(...)` +
+  `webhook_push.emit(...)` nas rotas, todas supondo o event loop: de uma rota
+  `def` (threadpool) o `emit` desistia calado e o `notify` mexia em
+  `asyncio.Queue` fora da thread dele. O `publicar` faz o salto de volta ao
+  loop. E quem segura um lock e espera o loop trava se o loop estiver esperando
+  aquele lock: solte, depois publique. Os testes trocam `webhook_push.emit` por
+  um espião de TRÊS posicionais, pelo atributo do módulo: não mude a
+  assinatura nem importe o `emit` por nome.
+- O corpo do webhook é montado UMA vez por assinante (`delivery` + `at` do
+  evento) e reenviado byte a byte nas tentativas. Montar dentro do laço de
+  tentativas mudaria o `at` e a assinatura, e o destinatário deduplica por
+  `delivery`.
+- **Formato de resposta é `server/app/schemas.py`, e NÃO é `response_model`.**
+  Ligar um modelo numa rota faz o FastAPI reescrever a resposta por ele: coage
+  tipos (`2.0` vira `2`), reordena chaves e engole campo desconhecido, e o
+  status da máquina é JSON livre de propósito. Os esquemas são injetados no
+  documento OpenAPI (`schemas.aplicar`); o fio continua sendo o dict do
+  serviço. Todo modelo é aberto e todo campo opcional. Rota nova que o MOJ lê:
+  acrescente em `schemas.DOCS`; `tests/test_openapi_shapes.py` valida respostas
+  reais e prende o contrato.
+- **Rota que cunha ou mata chave de ADMIN chama `auth.conferir_reauth`.** É o
+  único ato que sobrevive à sessão que o fez: por cookie exige `current_key` (a
+  MESMA chave da sessão, por id e impressão digital), por Bearer a posse já
+  está provada. A recusa é 403 `reauth_required`, nunca 401 (a tela concluiria
+  que a sessão morreu). A sessão de admin guarda `key_fp`: revogar uma chave
+  derruba as sessões DELA, e recriar o mesmo id não revive sessão antiga.
+- **`last_used` de chave nunca escreve por requisição e nunca toca o
+  `admin.json`** (`services/keyusage.py`): mapa em memória, despejo 1x/min em
+  `keys/last-used.json`. Um defeito ali não pode trancar a administração.
+- `admin.json` e `services.json` só se escrevem por `services/keys.py` (lock,
+  data, quem criou). Nome de chave de serviço repetido é 409: sobrescrever
+  trocava a credencial do MOJ calado. Trocar é `rotate`.
+- Os mapas em memória do processo (`keyusage`, `presence`, `ratelimit`) valem
+  entre testes: `conftest.data_root` zera os dois primeiros; teste que mexe em
+  limite de taxa chama `ratelimit.reset()`.
+- **As telas são módulos ES, e o navegador guarda módulo em cache.** Depois
+  de um deploy, um `app.js` novo importando um `times.js` antigo (ou um CSS
+  velho) abre a tela em branco ou torta, sem erro. O nginx manda
+  `Cache-Control: no-cache` para `web/` (revalida por ETag; nada trafega quando
+  não mudou); `tests/test_web_ids.py` confere TODOS os `.js` de cada tela e que
+  todo `import` aponta para arquivo existente. Ao testar no navegador, recarregue
+  sem cache antes de concluir que o CSS está errado.
+- O no-undef caseiro de `tests/test_web_js.py` não entende: método abreviado em
+  objeto (`{ ack() {} }`), função usada antes da declaração (hoisting), regex
+  com aspa dentro de classe (`/[",]/`), `import { a as b }`, reexportação
+  (`export { x } from`) e import padrão. Escreva `const f = () => …` e
+  `{ acompanhar, ack }`, declare antes de usar, importe pelo nome e monte a
+  aspa com `String.fromCharCode(34)`.
+- **O console tem três modos: lista, página de detalhe e diálogo.** A tela
+  antiga chegou a 15 cartões numa página, 9 botões por linha de imagem, quatro
+  construtores de `<dialog>` copiados um do outro, `prompt()`/`confirm()` e um
+  painel pendurado no fim do `<body>`: cada remendo trazia mais um jeito. Hoje
+  `<dialog>` só nasce em `web/common/dialogo.js` (`confirmar`, `formulario`,
+  `mostrarSegredo`, `abrirDialogo`), handler assíncrono passa por `acao()` de
+  `web/common/acao.js` (desliga o botão, mostra o erro de um jeito só) e a rota
+  é o hash (`#aba/id/secao`, em `web/admin/rotas.js`). Ação nova vira seção da
+  página do objeto ou um desses diálogos, nunca um cartão ou mais um botão na
+  linha. Dois detalhes que custaram caro: o `<dialog>` modal fica na camada de
+  cima, então `toast()` põe o aviso DENTRO do diálogo aberto (no `<body>` ele
+  ficava atrás); e o segredo mostrado uma vez barra o `keydown` do Esc, porque
+  o `cancel` só é cancelável depois de um gesto do usuário. O endereço da
+  página de uma pessoa usa o `owner_ref`, nunca o código de convite (que é
+  credencial e iria para o histórico). `tests/test_console.py` segura a porta.
+- **Classe de CSS vem do CSS que a tela carrega.** O painel de camadas do
+  console usava `div.detail`, que só existe no `lab.css` do laboratório: saía
+  sem estilo, e cada clique empilhava mais um no fim da página. Componente
+  comum mora em `web/common/style.css`; `tests/test_web_css.py` confere cada
+  classe usada (no HTML e em todo o grafo de módulos) contra o CSS da tela, e
+  os ganchos só de JavaScript ficam numa lista, cada um com o motivo.
+- **O `attach` de uma construção vai ao modelo DELA.** O worker instala os
+  pacotes por cima das camadas daquele modelo, e o estado do apt da camada só
+  confere com aquela base (a tela avisa antes de pôr a camada noutro modelo
+  pela rota comum de camadas). `POST /layerbuilds/{id}/attach` com `model: true`
+  grava no `job.model` (posição 0, papel `extra`, `from_build`); o `attach_to`
+  do pedido só vale com o corpo vazio. E `store.site_image_layers` descarta
+  arquivo repetido (o primeiro vence): uma camada na imagem e no modelo não
+  pode ir duas vezes ao manifest. Há teste (`tests/test_camadas_anexar.py`).
+- **O formulário do modelo se lê por `store.get_schema` (`_esquema`), nunca o
+  arquivo.** O `schema.json` cru não tem o campo acrescentado ao esquema padrão
+  depois da criação do modelo. Três leitores crus viraram três defeitos no dia
+  do `MAXMONITORS`: o "Salvar" dos cadeados recusou todo modelo (a tela devolve
+  os campos que o `GET /schema` mostrou), o `schema` de `GET /models/{nome}`
+  vinha sem o campo, e o modelo derivado nascia copiando a falta. Há teste que
+  conta os leitores. E o servidor grava os campos novos em todos os modelos ao
+  subir (`store.completar_esquemas`, no lifespan): o deploy de sempre propaga.
+  A regra de formato do item (`item_pattern`, `item_reserved`) é
+  `config.DITADOS_PELO_PADRAO`: vale a do padrão POR CIMA do arquivo. Com "o
+  arquivo vence", afrouxar a regra do allowlist para aceitar o `_` do nome que
+  o MOJ gera não chegou a nenhum modelo, porque o `completar_esquemas` já tinha
+  gravado a regra antiga em todos.
+- **O padrão de senha do formulário é hash, e hash não sai pela API.** O
+  `default_hash` do `ROOT_PASSWORD` é o `$6$` da senha de root da organização,
+  e o `GET /config` o entregava ao token da sede, que o quebrava offline. O
+  filtro (`config.esquema_publico`) mora no funil `store.get_model` e no
+  `/config`; quem precisa do hash (o stuff, a validação) lê o formulário por
+  `store.get_schema`. Rota nova que devolva o formulário passa pelo funil.
+  `tests/test_owner_leak.py` varre as rotas de modelo do OpenAPI pelo valor.
+- **`--check` que só confere `which` mente.** O worker de camadas dizia
+  "pré-requisitos ok" numa máquina sem `uidmap` e com userns proibido pelo
+  kernel; o job morreu com código 127 depois de baixar a base. A construção
+  precisa de faixa de subuid + newuidmap + userns E mount namespace liberados
+  (sysctl `kernel.apparmor_restrict_unprivileged_userns` no Ubuntu 24.04): o
+  check faz um `unshare --user --map-auto --mount true` de verdade e traduz o
+  stderr em providência. Pré-requisito novo de construção entra no check, não
+  só na doc.
+- **GApplication cujo `activate` só dispara trabalho assíncrono encerra em
+  1 ms.** Sem janela e sem `hold()`, a contagem de uso é zero e `app.run()`
+  volta antes de o callback rodar. A tela de bloqueio (`maratona-wait`) montava
+  a janela no callback do curl do lockinfo: com `mac` vazio o caminho era
+  síncrono e funcionava por acaso; o `--mac` do agente novo virou o caminho
+  assíncrono e a tela morreu em toda máquina por uma semana, em silêncio,
+  porque o agente nasce com stderr em /dev/null. `app.hold()` antes do
+  assíncrono, `release()` no `finally`, e o que a tela imprime vai para o
+  journal (`logger -t nb3-lock`). Teste com gjs de verdade em
+  `tests/test_lock_screen.py`.
 
 ## Estilo
 

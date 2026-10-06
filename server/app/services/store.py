@@ -89,12 +89,38 @@ def list_public_models() -> list[dict]:
     return out
 
 
+def _esquema_cru(d: Path) -> dict:
+    # o arquivo como está: só o `_esquema` e o `completar_esquemas` (que
+    # compara os dois) podem usar isto (há teste)
+    return fsdb.read_json(d / "schema.json", {"fields": []}) or {"fields": []}
+
+
+def _esquema(d: Path) -> dict:
+    """O formulário do modelo como todo leitor tem de vê-lo: o arquivo mais os
+    campos novos do esquema padrão (`config._com_padroes`).
+
+    O arquivo cru não tem o campo acrescentado ao padrão depois da criação do
+    modelo: o "Salvar" dos cadeados validava contra ele e recusou todo modelo no
+    dia em que entrou o MAXMONITORS, e o modelo derivado nascia copiando a
+    falta.
+    """
+    from .config import _com_padroes
+
+    return _com_padroes(_esquema_cru(d))
+
+
 def get_model(name: str) -> dict | None:
+    """O modelo como sai pela API, com o formulário sem o `default_hash`
+    (`config.esquema_publico`). É o funil: toda rota que devolve o modelo passa
+    por aqui, e quem precisa do hash (o stuff, a validação) lê o formulário por
+    `get_schema`."""
+    from .config import esquema_publico
+
     tpl = fsdb.read_json(model_dir(name) / "model.json")
     if tpl is None:
         return None
     tpl["name"] = name
-    tpl["schema"] = fsdb.read_json(model_dir(name) / "schema.json", {})
+    tpl["schema"] = esquema_publico(_esquema(model_dir(name)))
     return tpl
 
 
@@ -106,7 +132,51 @@ def set_model_layers(name: str, layers: list[dict]) -> None:
 
 
 def get_schema(name: str) -> dict:
-    return fsdb.read_json(model_dir(name) / "schema.json", {"fields": []}) or {"fields": []}
+    return _esquema(model_dir(name))
+
+
+def _o_que_mudou(cru: dict, completo: dict) -> list[str]:
+    antes = {f.get("key"): f for f in cru.get("fields", [])}
+    mudou = []
+    for f in completo.get("fields", []):
+        velho = antes.get(f.get("key"))
+        if velho is None:
+            mudou.append(f["key"])
+            continue
+        mudou += [f"{f['key']}.{k}" for k in sorted(set(f) | set(velho)) if f.get(k) != velho.get(k)]
+    return mudou
+
+
+def completar_esquemas() -> dict[str, list[str]]:
+    """Grava em cada modelo o que o `_esquema` acrescenta ao arquivo.
+
+    Roda quando o servidor sobe: o deploy é `git pull` + restart, e assim o
+    campo novo do esquema padrão chega ao `schema.json` de TODO modelo sem passo
+    à mão. Acrescenta campo e metadado que faltam e troca a regra que o padrão
+    dita (`config.DITADOS_PELO_PADRAO`); o que é do modelo (padrão, cadeado,
+    textos) fica. Não regrava o que já está completo. Devolve {modelo: o que
+    mudou}: o campo novo pelo nome, o metadado como `CAMPO.metadado`.
+    """
+    base = settings.data_root / "models"
+    feitos: dict[str, list[str]] = {}
+    if not base.is_dir():
+        return feitos
+    for d in sorted(base.iterdir()):
+        if not (d / "model.json").is_file():
+            continue
+        try:
+            with fsdb.locked(d):
+                cru = _esquema_cru(d)
+                completo = _esquema(d)
+                if completo == cru:
+                    continue
+                fsdb.write_json(d / "schema.json", completo)
+            feitos[d.name] = _o_que_mudou(cru, completo)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            # um modelo com arquivo estragado não pode impedir o servidor de
+            # subir nem os outros de serem completados
+            feitos[d.name] = [f"erro: {e}"]
+    return feitos
 
 
 def set_schema_locks(name: str, locks: dict) -> dict:
@@ -118,7 +188,8 @@ def set_schema_locks(name: str, locks: dict) -> dict:
     """
     d = model_dir(name)
     with fsdb.locked(d):
-        schema = fsdb.read_json(d / "schema.json", {"fields": []}) or {"fields": []}
+        # a tela manda o cadeado de TODOS os campos que o GET /schema mostrou
+        schema = _esquema(d)
         conhecidos = {f["key"] for f in schema.get("fields", [])}
         desconhecidos = set(locks) - conhecidos
         if desconhecidos:
@@ -137,12 +208,10 @@ def set_schema_field(name: str, key: str, patch: dict) -> dict:
     """
     d = model_dir(name)
     with fsdb.locked(d):
-        from .config import _com_padroes
-
         # com os metadados de formato do esquema padrão: o schema.json gravado
         # na criação do modelo não os tem, e sem eles a validação abaixo não
         # sabe o que exigir
-        schema = _com_padroes(fsdb.read_json(d / "schema.json", {"fields": []}) or {"fields": []})
+        schema = _esquema(d)
         alvo = next((f for f in schema.get("fields", []) if f["key"] == key), None)
         if alvo is None:
             raise ImageError(f"campo '{key}' não existe neste modelo")
@@ -237,7 +306,9 @@ def create_model(
             raise ImageError(f"modelo de origem '{from_model}' não existe")
         base = fsdb.read_json(model_dir(from_model) / "model.json", {}) or {}
         layers = list(base.get("layers", []))
-        schema = fsdb.read_json(model_dir(from_model) / "schema.json", schema) or schema
+        # completo: copiar o arquivo cru fazia o derivado nascer sem os campos
+        # acrescentados ao padrão depois da origem
+        schema = _esquema(model_dir(from_model))
 
     d = model_dir(name)
     with fsdb.locked(d):
@@ -465,11 +536,32 @@ def rotate_boot_key(image_id: str) -> str:
     return chave
 
 
+def rotate_machine_key(image_id: str, grace_hours: float) -> dict:
+    """Troca a chave de máquina. A máquina só recebe a chave no BOOT (ela vem
+    no stuff), então quem está ligada continua com a antiga até reiniciar: sem
+    carência, a sala inteira fica muda na hora, inclusive para a ordem de
+    destravar. Na carência a antiga continua valendo (`machine.key.prev`)."""
+    nova = auth.new_key("nb3m")
+    d = site_image_dir(image_id)
+    ate = int(time.time() + max(0.0, grace_hours) * 3600)
+    with fsdb.locked(d):
+        antiga = (fsdb.read_text(d / "machine.key") or "").strip()
+        if antiga and grace_hours > 0:
+            fsdb.write_json(d / "machine.key.prev", {"key": antiga, "valid_until": ate}, mode=0o600)
+        else:
+            (d / "machine.key.prev").unlink(missing_ok=True)
+        fsdb.write_text(d / "machine.key", nova + "\n", mode=0o600)
+    return {"machine_key": nova, "previous_valid_until": ate if antiga and grace_hours > 0 else None}
+
+
 def patch_site_image(image_id: str, fields: dict) -> dict:
     d = site_image_dir(image_id)
     with fsdb.locked(d):
         info = fsdb.read_json(d / "image.json") or {}
-        for k in ("fullname", "unlocked", "model", "wallpaper_locked", "build_quota"):
+        for k in (
+            "fullname", "unlocked", "model", "wallpaper_locked", "build_quota",
+            "dashboard_hidden", "country",
+        ):
             if k in fields and fields[k] is not None:
                 if k == "model" and not model_exists(fields[k]):
                     raise ImageError(f"modelo '{fields[k]}' não existe")
@@ -478,10 +570,60 @@ def patch_site_image(image_id: str, fields: dict) -> dict:
     return info
 
 
+# ISO 3166-1 alpha-2. Lista fechada de propósito: o país derivado do id só vale
+# se as duas letras forem mesmo um país (`26tete` e `26icpclatamtest` dariam
+# "TE" e "IC", que não existem).
+_PAISES = frozenset(
+    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS "
+    "BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE "
+    "EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM "
+    "HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC "
+    "LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA "
+    "NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW "
+    "SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO "
+    "TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW".split()
+)
+_PAIS_NO_ID = re.compile(r"^\d{2}([a-z]{2})")
+
+
+def country_of(info: dict) -> str:
+    """País da sede (alpha-2), ou "" quando não dá para saber. O campo
+    explícito vence; senão, o id das sedes da competição (`26brspsp`) o traz
+    depois do ano. Imagem pessoal sem o campo fica sem país: inventar um é
+    pior que não dizer."""
+    explicito = str(info.get("country") or "").upper()
+    if explicito in _PAISES:
+        return explicito
+    if info.get("namespace") == "contest":
+        m = _PAIS_NO_ID.match(str(info.get("id", "")))
+        if m and m.group(1).upper() in _PAISES:
+            return m.group(1).upper()
+    return ""
+
+
+def site_image_visivel_na_frota(info: dict) -> bool:
+    """Falso para a imagem marcada `dashboard_hidden` (a de teste dos times):
+    ela existe, tem hotconfig e configureitor, mas não entra em /labs*."""
+    return not bool(info.get("dashboard_hidden"))
+
+
 def delete_site_image(image_id: str) -> None:
     d = site_image_dir(image_id)
-    if d.is_dir():
-        shutil.rmtree(d)
+    if not d.is_dir():
+        return
+    # O pendrive pré-configurado (~400 MB) e o estado de publicação vivem fora
+    # do diretório da imagem e só o usb.json sabe o nome deles: sem isto o
+    # rmtree deixava um .img órfão e um publish/*.json que o retry_failed
+    # tentaria reenviar. O .img.gz no servidor de arquivos fica (não há rota
+    # de remoção lá).
+    from . import publish, usb
+
+    estado = fsdb.read_json(d / "usb.json", {}) or {}
+    nome = estado.get("file")
+    if nome:
+        usb.file_path(nome).unlink(missing_ok=True)
+        publish._state_path(nome).unlink(missing_ok=True)
+    shutil.rmtree(d)
 
 
 def rotate_token(image_id: str) -> str:
@@ -498,7 +640,18 @@ def site_image_layers(image_id: str) -> list[dict]:
     info = get_site_image(image_id) or {}
     extra = fsdb.read_json(site_image_dir(image_id) / "layers-extra.json", []) or []
     tpl = fsdb.read_json(model_dir(info.get("model", "")) / "model.json", {}) or {}
-    return list(extra) + list(tpl.get("layers", []))
+    # a mesma camada pode estar na imagem e no modelo (anexada à imagem pela
+    # construção e, depois, ao modelo inteiro): a máquina a montaria duas vezes
+    # no lowerdir. Fica a primeira, que é a de maior prioridade.
+    vistas: set[str] = set()
+    camadas = []
+    for c in list(extra) + list(tpl.get("layers", [])):
+        arquivo = str(c.get("file", ""))
+        if arquivo in vistas:
+            continue
+        vistas.add(arquivo)
+        camadas.append(c)
+    return camadas
 
 
 def config_values(image_id: str) -> dict:

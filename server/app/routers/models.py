@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from .. import auth
+from .. import auth, fsdb
 from ..models import ModelLayers
-from ..services import layer_roles, ownership, store
+from ..services import layer_roles, layerbuilds, ownership, store
+from ..services.config import esquema_publico
 from ..services import wallpaper as wp
 from ..settings import settings
 
@@ -79,7 +80,41 @@ async def list_models(p=Depends(auth.require_console)) -> dict:
 async def get_model(name: str, p=Depends(auth.require_console)) -> dict:
     if not ownership.can_use_model(p, name):
         raise HTTPException(404, "modelo não existe")
-    return store.get_model(name) or {}
+    tpl = dict(store.get_model(name) or {})
+    dono = store.model_owner(name)
+    if not ownership.pode_ver_dono(p, dono):
+        tpl.pop("owner", None)
+    # as imagens deste modelo que quem pergunta enxerga, com as camadas só
+    # delas: sem isto a tela do modelo dizia "2 camadas" enquanto a imagem
+    # bootava com 3, e o dono não sabia em qual informação confiar
+    imagens = []
+    for img_id in store.models_using(name):
+        if not ownership.can_see_site_image(p, img_id):
+            continue
+        info = store.get_site_image(img_id) or {}
+        extras = fsdb.read_json(store.site_image_dir(img_id) / "layers-extra.json", []) or []
+        imagens.append(
+            {
+                "id": img_id,
+                "fullname": info.get("fullname", ""),
+                "unlocked": bool(info.get("unlocked")),
+                "layers": [
+                    {"file": c.get("file"), "md5": c.get("md5"), "role": c.get("role"),
+                     "from_build": c.get("from_build")}
+                    for c in extras
+                ],
+            }
+        )
+    achado = wp.do_modelo(name)
+    return {
+        **tpl,
+        **ownership.owner_publico(dono),
+        "can_manage": ownership.can_manage_model(p, name),
+        "mine": dono == p.owner,
+        "image_extras": imagens,
+        # a tela sabe se há papel de parede sem pedir o arquivo e levar 404
+        "wallpaper": achado[1] if achado else None,
+    }
 
 
 @router.patch("/models/{name}")
@@ -116,7 +151,14 @@ async def delete_model(name: str, p=Depends(auth.require_console)) -> None:
 
 
 @router.get("/models/{name}/wallpaper")
-async def get_model_wallpaper(name: str, p=Depends(auth.require_console)):
+async def get_model_wallpaper(name: str, request: Request):
+    """A prévia do console é um `<img>`, que não manda `X-NB-Console`: aceita o
+    cookie de sessão sem o cabeçalho, como a prévia do papel de parede da
+    imagem (`routers/config.py`). Pelo `require_console` a prévia nunca
+    carregou, e cada tentativa gastava o limitador de login do IP."""
+    p = auth.principal_de_link(request)
+    if p is None or p.kind not in ("admin", "subadmin"):
+        raise HTTPException(401, "credencial ausente ou inválida")
     if not ownership.can_use_model(p, name):
         raise HTTPException(404, "modelo não existe")
     achado = wp.do_modelo(name)
@@ -209,13 +251,39 @@ async def put_model_layers(name: str, body: ModelLayers, p=Depends(auth.require_
 
 @router.get("/layers/catalog")
 async def layers_catalog(p=Depends(auth.require_console)) -> dict:
-    """Camadas já em uso nos modelos visíveis — a lista de onde se escolhe
-    telemetria, wifi e afins ao montar um modelo novo."""
+    """Camadas de onde se escolhe ao montar um modelo: as já em uso nos modelos
+    visíveis (telemetria, wifi e afins) e as construções prontas que quem
+    pergunta enxerga, com o md5 que a tela não tinha como mostrar. Sem estas,
+    quem construiu uma camada precisava digitar o md5 para pô-la num modelo, e
+    não havia onde lê-lo."""
     vistas: dict[str, dict] = {}
     for modelo in ownership.visible_models(p):
         for camada in (store.get_model(modelo["name"]) or {}).get("layers", []):
             chave = f"{camada.get('file')}:{camada.get('md5')}"
             vistas.setdefault(chave, {**camada, "used_by": []})["used_by"].append(modelo["name"])
+    for estado, job in layerbuilds.todos():
+        saida = job.get("output") or {}
+        if estado != "done" or not saida.get("file") or not layerbuilds.visivel(p, job):
+            continue
+        chave = f"{saida['file']}:{saida.get('md5')}"
+        item = vistas.setdefault(
+            chave,
+            {
+                "file": saida["file"],
+                "md5": saida.get("md5"),
+                "cdn_url": layerbuilds.url_da_camada(saida),
+                "size": saida.get("size"),
+                "role": "extra",
+                "used_by": [],
+            },
+        )
+        item["build"] = {
+            "id": job.get("id"),
+            "name": job.get("name"),
+            "model": job.get("model"),
+            "finished_at": job.get("finished_at"),
+        }
+        item["available"] = layerbuilds.disponivel(saida)
     return {"layers": sorted(vistas.values(), key=lambda c: c.get("file", ""))}
 
 
@@ -226,12 +294,7 @@ async def layers_catalog(p=Depends(auth.require_console)) -> dict:
 async def get_model_schema(name: str, p=Depends(auth.require_console)) -> dict:
     if not ownership.can_use_model(p, name):
         raise HTTPException(404, "modelo não existe")
-    from ..services.config import _com_padroes
-
-    # `_com_padroes` é o mesmo caminho que o `set_schema_field` usa para
-    # validar: traz do esquema padrão os metadados de formato que um
-    # `schema.json` gravado antes deles não tem.
-    schema = _com_padroes(store.get_schema(name))
+    schema = esquema_publico(store.get_schema(name))
     return {
         "name": name,
         "fields": [
@@ -246,6 +309,7 @@ async def get_model_schema(name: str, p=Depends(auth.require_console)) -> dict:
                 # idioma ficava impossível pela tela
                 "options": f.get("options"),
                 "locked": bool(f.get("locked")),
+                **({"has_default": f["has_default"]} if "has_default" in f else {}),
             }
             for f in schema.get("fields", [])
         ],

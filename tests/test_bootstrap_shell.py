@@ -41,12 +41,17 @@ def sh(tmp_path):
     """Executa trechos do bootstrap com caminhos redirecionados para tmp."""
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
-    for tool in ("blkid", "mount", "umount", "rfkill"):
+    for tool in ("blkid", "mount", "umount", "rfkill", "udevadm"):
         p = fakebin / tool
         p.write_text("#!/bin/sh\nexit 1\n")
         p.chmod(0o755)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+
+    def _stub(nome: str, corpo: str) -> None:
+        p = fakebin / nome
+        p.write_text("#!/bin/sh\n" + corpo)
+        p.chmod(0o755)
 
     def _run(script: str, **env):
         full = HARNESS + "\n" + script
@@ -64,6 +69,10 @@ def sh(tmp_path):
             "NB_CFG_TRIES": "1",
             "NB_CFG_WAIT": "0",
             "NB_FATAL_WAIT": "0",
+            "NB_USB_LIVRE_MARK": str(tmp_path / "usb-livre"),
+            "NB_USB_LIVRE_WAIT": "0",
+            # o conf do netboot, que só existe quando o teste o cria
+            "NB_NETCONF": str(tmp_path / "netboot" / "nutellaboot.conf"),
             **{k: str(v) for k, v in env.items()},
         }
         r = subprocess.run(["sh", "-c", full], capture_output=True, text=True, env=e)
@@ -72,6 +81,7 @@ def sh(tmp_path):
 
     _run.tmp = tmp_path
     _run.run_dir = run_dir
+    _run.stub = _stub
     return _run
 
 
@@ -127,6 +137,7 @@ def test_le_o_pendrive_sem_head_no_caminho(tmp_path):
             "NB_RUN": str(run_dir),
             "NB_HOSTS_FILE": str(tmp_path / "hosts"),
             "NB_DEFAULTS_FILE": str(tmp_path / "defaults"),
+            "NB_NETCONF": str(tmp_path / "sem-netboot"),
             "NB_CFG_TRIES": "1",
             "NB_CFG_WAIT": "0",
         },
@@ -313,7 +324,7 @@ def test_wpaconf_absent_wifi_conf(sh):
 
 def test_usbconfig_reads_pendrive(sh):
     (sh.run_dir / "nutellaboot.conf").write_text(
-        "IMAGEROOT=25brbr\nNB_SERVER=https://exemplo.test/\n"
+        "IMAGEROOT=25brbr\nNB_BOOT_KEY=nb3b_x\nNB_SERVER=https://exemplo.test/\n"
     )
     out = sh('nb_read_usbconfig; echo "I=$IMAGEROOT S=$NB_SERVER"')
     assert "I=25brbr" in out
@@ -321,22 +332,24 @@ def test_usbconfig_reads_pendrive(sh):
 
 
 def test_usbconfig_cmdline_beats_pendrive(sh):
-    (sh.run_dir / "nutellaboot.conf").write_text("IMAGEROOT=doPendrive\n")
+    (sh.run_dir / "nutellaboot.conf").write_text("IMAGEROOT=doPendrive\nNB_BOOT_KEY=nb3b_x\n")
     out = sh('IMAGEROOT=daCmdline; nb_read_usbconfig; echo "I=$IMAGEROOT"')
     assert "I=daCmdline" in out
 
 
 def test_usbconfig_falls_back_to_builtin_defaults(sh):
     (sh.tmp / "defaults").write_text("NB_SERVER=https://padrao.embutido\n")
-    (sh.run_dir / "nutellaboot.conf").write_text("IMAGEROOT=x\n")
+    (sh.run_dir / "nutellaboot.conf").write_text("IMAGEROOT=x\nNB_BOOT_KEY=nb3b_x\n")
     out = sh('nb_read_usbconfig; echo "S=$NB_SERVER"')
     assert "S=https://padrao.embutido" in out
 
 
 def test_usbconfig_without_imageroot_reboots(sh):
     """Sem IMAGEROOT não há o que bootar: avisa e reinicia (nunca trava)."""
+    (sh.run_dir / "nutellaboot.conf").write_text("NB_BOOT_KEY=nb3b_x\n")
     out = sh("NB_FATAL_WAIT=0; nb_read_usbconfig; echo NAO-DEVERIA-CHEGAR-AQUI")
     assert "REBOOT-CHAMADO" in out
+    assert "does not say which image" in out or "NO IMAGE" in out or "IMAGEROOT" in out
     assert "NAO-DEVERIA-CHEGAR-AQUI" not in out
 
 
@@ -344,7 +357,7 @@ def test_nb_hosts_pin(sh):
     """NB_HOSTS vira linha de /etc/hosts — é o que permite testar em qemu
     (SLIRP, host em 10.0.2.2) sem abrir mão da validação de certificado."""
     (sh.run_dir / "nutellaboot.conf").write_text(
-        "IMAGEROOT=x\nNB_HOSTS=nutellaboot.charge.naquadah.com.br 10.0.2.2\n"
+        "IMAGEROOT=x\nNB_BOOT_KEY=nb3b_x\nNB_HOSTS=nutellaboot.charge.naquadah.com.br 10.0.2.2\n"
     )
     sh("nb_read_usbconfig")
     assert "10.0.2.2 nutellaboot.charge.naquadah.com.br" in (sh.tmp / "hosts").read_text()
@@ -437,3 +450,258 @@ def test_o_hook_leva_o_firmware_do_iwlwifi_pela_maior_api_disponivel():
     ferramenta = (REPO / "tools" / "nb3-build-initrd").read_text(encoding="utf-8")
     for canario in ("iwlwifi-so-a0-hr-b0-", "iwlwifi-ty-a0-gf-a0-", "iwlwifi-QuZ-a0-hr-b0-"):
         assert canario in ferramenta, f"o build não confere o canário {canario}"
+
+
+# --- a partição NB3CFG demora, ou não vem ------------------------------------
+#
+# Caso de campo: um SATA morrendo prendeu o `blkid -L` por 33 s, a partição do
+# pendrive não foi lida em 10 s de tentativas, e o boot seguiu com a sede da
+# cmdline, o servidor padrão (que era o do nb2!) e a chave vazia — dez
+# tentativas de rede e uma tela NO NETWORK que mandava procurar cabo.
+
+
+CONF_BOM = "IMAGEROOT=sala9\nNB_BOOT_KEY=nb3b_abc\nNB_SERVER=https://conf.test/\n"
+
+
+def _pendrive_de_mentira(sh):
+    """Um diretório com os arquivos do pendrive; o stub de mount copia dali."""
+    fake = sh.tmp / "fakecfg"
+    fake.mkdir()
+    (fake / "nutellaboot.conf").write_text(CONF_BOM)
+    (fake / "wifi.conf").write_text("Rede\tsenha-boa\n")
+    sh.stub("mount", f'mkdir -p "$4"; cp "{fake}"/* "$4"/; exit 0\n')
+    sh.stub("umount", "exit 0\n")
+    return fake
+
+
+def test_usbconfig_tenta_de_novo_ate_o_pendrive_aparecer(sh):
+    _pendrive_de_mentira(sh)
+    contador = sh.tmp / "blkid.count"
+    sh.stub(
+        "blkid",
+        f'n=$(cat "{contador}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{contador}"\n'
+        "[ $n -ge 3 ] && { echo /dev/falso; exit 0; }\nexit 2\n",
+    )
+    out = sh(
+        'nb_read_usbconfig; echo "I=$IMAGEROOT K=$NB_BOOT_KEY"',
+        NB_CFG_TRIES="5",
+        NB_CFG_WAIT="0",
+        NB_CFG_BYLABEL=str(sh.tmp / "nao-existe"),
+    )
+    # o harness silencia o nb_log; o marcador "pode retirar o pendrive" e o
+    # wifi.conf copiado provam que a leitura chegou ao fim pelo /dev/falso
+    assert contador.read_text().strip() == "3"
+    assert "I=sala9 K=nb3b_abc" in out
+    assert (sh.tmp / "usb-livre").is_file()
+    assert (sh.run_dir / "wifi.conf").is_file()
+    assert "REBOOT-CHAMADO" not in out
+
+
+def test_usbconfig_acha_o_pendrive_pelo_link_do_udev(sh):
+    """O link do udev nasce do evento do PRÓPRIO pendrive, sem varrer o disco
+    doente — por isso vem antes do blkid."""
+    _pendrive_de_mentira(sh)
+    contador = sh.tmp / "blkid.count"
+    sh.stub("blkid", f'echo x > "{contador}"; exit 2\n')
+    alvo = sh.tmp / "dev-pelo-udev"
+    alvo.write_text("")
+    link = sh.tmp / "by-label"
+    link.symlink_to(alvo)
+    out = sh('nb_read_usbconfig; echo "I=$IMAGEROOT"', NB_CFG_BYLABEL=str(link))
+    assert "I=sala9" in out and (sh.tmp / "usb-livre").is_file()
+    assert not contador.exists(), "o blkid nem foi chamado"
+
+
+def test_usbconfig_sem_particao_diz_que_nao_apareceu(sh):
+    out = sh(
+        "nb_read_usbconfig; echo NAO-DEVERIA-CHEGAR-AQUI",
+        NB_CFG_TRIES="2",
+        NB_CFG_WAIT="0",
+        NB_CFG_BYLABEL=str(sh.tmp / "nao-existe"),
+    )
+    assert "the NB3CFG partition did not show up in 0s" in out
+    assert "was not read" in out
+    assert "REBOOT-CHAMADO" in out
+    assert "NAO-DEVERIA-CHEGAR-AQUI" not in out
+
+
+def test_usbconfig_com_particao_mas_mount_falhou(sh):
+    sh.stub("blkid", "echo /dev/falso\n")
+    out = sh("nb_read_usbconfig; echo NAO", NB_CFG_BYLABEL=str(sh.tmp / "nao-existe"))
+    assert "found /dev/falso but mount failed" in out
+    assert "REBOOT-CHAMADO" in out
+
+
+def test_usbconfig_conf_sem_chave_e_pendrive_gravado_errado(sh):
+    (sh.run_dir / "nutellaboot.conf").write_text("IMAGEROOT=sala9\n")
+    out = sh("nb_read_usbconfig; echo NAO")
+    assert "has no NB_BOOT_KEY line" in out
+    assert "REBOOT-CHAMADO" in out
+
+
+def test_usbconfig_cmdline_beats_pendrive_no_servidor(sh):
+    """A mesma precedência do IMAGEROOT: o GRUB da imagem pré-configurada leva
+    NB_SERVER na cmdline, e ele tem que vencer o conf e o padrão embutido."""
+    (sh.tmp / "defaults").write_text("NB_SERVER=https://padrao.embutido\n")
+    (sh.run_dir / "nutellaboot.conf").write_text(CONF_BOM)
+    out = sh('NB_SERVER=https://cmdline.test; nb_read_usbconfig; echo "S=$NB_SERVER"')
+    assert "S=https://cmdline.test" in out
+    # a leitura consome a cópia em RAM (é o que tira a chave do /run)
+    (sh.run_dir / "nutellaboot.conf").write_text(CONF_BOM)
+    out = sh('nb_read_usbconfig; echo "S=$NB_SERVER"')
+    assert "S=https://conf.test" in out
+
+
+# --- boot pela rede ---------------------------------------------------------
+#
+# Uma sede que boota por DHCP + iPXE, como fazia no nb2, parava na tela NO CONF
+# depois de 40 s procurando um pendrive que não existe. O carregador agora
+# entrega o nutellaboot.conf como um arquivo a mais dentro do initrd.
+
+
+def _netconf(sh, texto: str) -> Path:
+    alvo = sh.tmp / "netboot" / "nutellaboot.conf"
+    alvo.parent.mkdir(exist_ok=True)
+    alvo.write_text(texto)
+    return alvo
+
+
+def test_netboot_le_o_conf_do_initrd_sem_procurar_o_pendrive(sh):
+    _netconf(sh, CONF_BOM)
+    contador = sh.tmp / "busca.count"
+    sh.stub("blkid", f'echo x >> "{contador}"; exit 2\n')
+    sh.stub("udevadm", f'echo x >> "{contador}"; exit 0\n')
+    out = sh(
+        'nb_read_usbconfig; echo "I=$IMAGEROOT K=$NB_BOOT_KEY S=$NB_SERVER NET=$NB_NETBOOT"',
+        NB_CFG_TRIES="3",
+        NB_CFG_BYLABEL=str(sh.tmp / "nao-existe"),
+    )
+    assert "I=sala9 K=nb3b_abc S=https://conf.test NET=1" in out
+    assert not contador.exists(), "procurou o pendrive num boot pela rede"
+    # nem a faixa de "pode retirar o pendrive": não há pendrive
+    assert not (sh.tmp / "usb-livre").exists()
+    assert "REBOOT-CHAMADO" not in out
+
+
+def test_netboot_a_cmdline_continua_vencendo_o_conf(sh):
+    _netconf(sh, CONF_BOM)
+    out = sh(
+        "IMAGEROOT=daCmdline; NB_SERVER=https://cmdline.test; nb_read_usbconfig; "
+        'echo "I=$IMAGEROOT S=$NB_SERVER"'
+    )
+    assert "I=daCmdline S=https://cmdline.test" in out
+
+
+def test_netboot_conf_vazio_para_com_a_causa(sh):
+    """Arquivo vazio é carregador mal configurado. Cair no caminho do pendrive
+    diria, 40 s depois, que a NB3CFG não apareceu — verdade que não ajuda."""
+    _netconf(sh, "")
+    out = sh("nb_read_usbconfig; echo NAO-DEVERIA-CHEGAR-AQUI")
+    assert "loaded over the network is empty" in out
+    assert "REBOOT-CHAMADO" in out
+    assert "NAO-DEVERIA-CHEGAR-AQUI" not in out
+
+
+def test_a_cmdline_nao_liga_o_netboot(sh):
+    """`NB_NETBOOT=1` na linha do kernel chega como variável de ambiente e
+    desligaria a regravação do pendrive em silêncio. Quem diz que o boot foi
+    pela rede é o arquivo."""
+    (sh.run_dir / "nutellaboot.conf").write_text(CONF_BOM)
+    out = sh('NB_NETBOOT=1; nb_read_usbconfig; echo "NET=[$NB_NETBOOT]"')
+    assert "NET=[]" in out
+
+
+def test_a_chave_de_boot_nao_fica_no_run(sh):
+    """O /run do initrd é movido para o sistema montado: a cópia do conf ali
+    era a chave de boot legível por qualquer usuário da máquina de prova."""
+    _netconf(sh, CONF_BOM)
+    out = sh('nb_read_usbconfig; echo "K=$NB_BOOT_KEY"')
+    assert "K=nb3b_abc" in out
+    assert not (sh.run_dir / "nutellaboot.conf").exists()
+
+    # o mesmo pelo pendrive
+    _pendrive_de_mentira(sh)
+    sh.stub("blkid", "echo /dev/falso\n")
+    (sh.tmp / "netboot" / "nutellaboot.conf").unlink()
+    out = sh('nb_read_usbconfig; echo "K=$NB_BOOT_KEY"', NB_CFG_BYLABEL=str(sh.tmp / "nao-existe"))
+    assert "K=nb3b_abc" in out
+    assert not (sh.run_dir / "nutellaboot.conf").exists()
+
+
+def test_conf_salvo_no_windows(sh):
+    """CRLF: o `\\r` grudado no valor vira IMAGEROOT e chave que o servidor não
+    conhece. O conf do netboot mora num servidor que a sede mesma edita."""
+    _netconf(
+        sh,
+        'set IMAGEROOT="sala9"\r\nset NB_BOOT_KEY="nb3b_abc"\r\n'
+        'set NB_HOSTS="nome.test 10.0.2.2"\r\n',
+    )
+    out = sh('nb_read_usbconfig; echo "I=[$IMAGEROOT] K=[$NB_BOOT_KEY]"')
+    assert "I=[sala9] K=[nb3b_abc]" in out
+    assert (sh.tmp / "hosts").read_text() == "10.0.2.2 nome.test\n"
+
+
+def test_o_stuff_tira_os_segredos_do_run(tmp_path):
+    """Pendrive com initrd antigo ainda deixa o conf (chave de boot) e o
+    wifi.conf (senhas) no /run, que vai inteiro para o sistema montado. O
+    stuff apaga os dois depois do último consumidor, o 80-nm-wifi.sh."""
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "nutellaboot.conf").write_text(CONF_BOM)
+    (run / "wifi.conf").write_text("Rede\tsenha-boa\n")
+    main = REPO / "client" / "stuff" / "90-main.sh"
+    r = subprocess.run(
+        ["sh", "-c", f'. "{main}"; nb3_limpa_run'],
+        env={"NB_RUN": str(run), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert not run.exists()
+
+    texto = main.read_text()
+    assert texto.index("    runpostmountconfigs\n") < texto.index("    nb3_limpa_run\n")
+
+
+NB2 = "https://nutellaboot.naquadah.com.br"
+
+
+def test_nenhum_padrao_do_cliente_aponta_para_o_servidor_do_nb2():
+    """No campo, um pendrive cuja partição não foi lida bootou contra o nb2 e
+    parou numa tela NO NETWORK enganosa: o padrão embutido era o host antigo,
+    e os exemplos das docs o repetiam."""
+    arquivos = [
+        p for p in (REPO / "client").rglob("*") if p.is_file() and "build" not in p.parts
+    ]
+    arquivos += [p for p in (REPO / "tools").glob("nb3-*") if p.name != "nb3-import-nb2"]
+    arquivos += list((REPO / "docs").glob("*.md"))
+    ruins = [str(p.relative_to(REPO)) for p in arquivos if NB2 in p.read_text(errors="ignore")]
+    assert ruins == [], ruins
+
+    servico = (REPO / "systemd" / "nutellaboot3.service").read_text()
+    base = re.search(r"NB3_BASE_URL=(\S+)", servico).group(1)
+    assert f"NB_DEFAULT_SERVER='{base}'" in BOOTSTRAP.read_text()
+    assert f"NB_SERVER={base}" in (REPO / "client" / "initramfs-tools" / "nutellaboot.defaults").read_text()
+
+
+def test_build_initrd_espera_o_no_da_particao_antes_de_montar():
+    """Na produção o `losetup -P` voltou antes de o udev criar o /dev/loopNp2 e
+    o mount falhou com "No such file or directory": o deploy parou sem initrd
+    novo. A ferramenta tem de esperar o nó aparecer."""
+    ferramenta = (REPO / "tools" / "nb3-build-initrd").read_text(encoding="utf-8")
+    losetup = ferramenta.index("losetup --show -fP")
+    monta = ferramenta.index('mount "$PART" "$MNT"')
+    espera = ferramenta[losetup:monta]
+    assert '[ ! -b "$PART" ]' in espera, "monta sem esperar o nó da partição"
+    assert "udevadm settle" in espera
+    assert 'mount "${LOOP}p2"' not in ferramenta, "sobrou um mount direto, sem espera"
+
+
+def test_servico_para_rapido_apesar_do_long_poll():
+    """Long-poll e SSE nunca terminam sozinhos: sem teto no desligamento
+    gracioso, cada `systemctl restart` levou 90 s e acabou em SIGKILL."""
+    servico = (REPO / "systemd" / "nutellaboot3.service").read_text()
+    gracioso = int(re.search(r"--timeout-graceful-shutdown (\d+)", servico).group(1))
+    teto = int(re.search(r"^TimeoutStopSec=(\d+)$", servico, re.M).group(1))
+    assert gracioso <= 15
+    assert gracioso < teto <= 30, "o systemd tem de dar tempo ao uvicorn, mas não 90 s"

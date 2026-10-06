@@ -17,7 +17,7 @@ import re
 import secrets
 
 from .. import fsdb
-from .store import config_values, get_site_image, model_dir, site_image_dir
+from .store import config_values, get_schema, get_site_image, site_image_dir
 
 
 class ConfigError(ValueError):
@@ -36,13 +36,21 @@ class ConfigError(ValueError):
 #
 # `options` porque sem elas o editor do console monta uma lista VAZIA e não dá
 # para escolher o padrão de um `select` — que foi o defeito relatado.
-HERDADOS_DO_PADRAO = ("sep", "item_pattern", "item_reserved", "hash", "options")
+HERDADOS_DO_PADRAO = ("sep", "hash", "options")
+
+# A regra do que o cliente aguenta consumir vem SEMPRE do esquema padrão, por
+# cima do arquivo do modelo: nenhuma rota deixa um modelo escolhê-la, então o
+# que o arquivo guarda é só uma cópia antiga dela. E o `completar_esquemas`
+# grava essa cópia em todo modelo quando o servidor sobe: com "o arquivo
+# vence", o `_` que o padrão passou a aceitar no nome do allowlist não chegava
+# a nenhum modelo que já existia, e a sede com o nome gerado pelo MOJ
+# continuava sem salvar.
+DITADOS_PELO_PADRAO = ("item_pattern", "item_reserved")
 
 
 def schema_for(image_id: str) -> dict:
     info = get_site_image(image_id) or {}
-    schema = fsdb.read_json(model_dir(info.get("model", "")) / "schema.json", {"fields": []})
-    return _com_padroes(schema)
+    return get_schema(info.get("model", ""))
 
 
 def _com_padroes(schema: dict) -> dict:
@@ -56,6 +64,9 @@ def _com_padroes(schema: dict) -> dict:
             continue
         for chave in HERDADOS_DO_PADRAO:
             if chave not in f and chave in base:
+                f[chave] = base[chave]
+        for chave in DITADOS_PELO_PADRAO:
+            if chave in base:
                 f[chave] = base[chave]
 
     # CAMPO NOVO do esquema padrão entra nos modelos que já existem.
@@ -199,6 +210,24 @@ def hash_do_campo(field: dict, password: str) -> str:
     if field.get("hash") == "crypt":
         return crypt_password(password)
     return hash_password(password)
+
+
+def esquema_publico(schema: dict) -> dict:
+    """O esquema como sai pela API: sem `default_hash`, com `has_default`.
+
+    O `default_hash` do ROOT_PASSWORD é o `$6$` da senha de root que a
+    organização escolheu, e quebra-se offline. O configureitor recebia o
+    esquema cru com o token da sede — justamente quem o cadeado do campo
+    impede de mexer no root. Quem lê precisa só saber que há um padrão.
+    """
+    campos = []
+    for f in schema.get("fields", []):
+        if isinstance(f, dict) and f.get("type") == "password":
+            f = {k: v for k, v in f.items() if k != "default_hash"} | {
+                "has_default": bool(f.get("default_hash"))
+            }
+        campos.append(f)
+    return {**schema, "fields": campos}
 
 
 def check_password(stored: str, password: str) -> bool:

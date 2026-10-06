@@ -45,10 +45,14 @@ GLOBALS = {
     "sessionStorage", "localStorage",
     "URLSearchParams", "URL", "FormData", "Blob", "File",
     "EventSource", "WebSocket", "AudioContext", "DOMParser", "CustomEvent",
+    # o segredo do webhook é gerado no navegador (crypto.getRandomValues)
+    "crypto", "Uint8Array",
     "JSON", "Math", "Date", "Promise", "Array", "Object", "String", "Number",
     "Boolean", "Set", "Map", "Error", "TypeError", "RegExp",
     "encodeURIComponent", "decodeURIComponent", "parseInt", "parseFloat",
     "isNaN", "isFinite", "structuredClone", "requestAnimationFrame",
+    # a vista do console que sai da tela cancela o que pediu
+    "AbortController",
 }
 
 IDENT = r"[A-Za-z_$][\w$]*"
@@ -123,6 +127,13 @@ def tirar_nao_codigo(texto: str) -> str:
                 if i < n and texto[i] == "/":
                     apagar(inicio + 1, i)
                     i += 1
+                    # as flags (`/x/gi`) não são identificador: sem isto o `g`
+                    # só passava onde a tela, por acaso, declarava um `g`
+                    fim = i
+                    while fim < n and texto[fim].isalpha():
+                        fim += 1
+                    apagar(i, fim)
+                    i = fim
                 continue
             if c == "}" and len(modo) > 1 and modo[-1] == "codigo":
                 # fecha um ${ ... }: volta ao texto do template
@@ -249,13 +260,14 @@ def test_nenhuma_variavel_sem_declaracao(arquivo):
 
 
 def test_o_verificador_acusa_o_bug_original():
-    """Reintroduz o `model: template` no admin/app.js de verdade (em memória)
-    e confere que o verificador aponta exatamente o `template`. Se um dia o
-    verificador afrouxar a ponto de deixar isso passar, este teste avisa."""
-    texto = (REPO / "web" / "admin" / "app.js").read_text(encoding="utf-8")
-    alvo = "{ id, fullname, model, unlocked, wallpaper_locked }"
+    """Reintroduz o `model: template` na criação de imagem do console de
+    verdade (em memória) e confere que o verificador aponta exatamente o
+    `template`. Se um dia o verificador afrouxar a ponto de deixar isso passar,
+    este teste avisa."""
+    texto = (REPO / "web" / "admin" / "imagens.js").read_text(encoding="utf-8")
+    alvo = "{ id, fullname, model, unlocked, wallpaper_locked, dashboard_hidden }"
     assert alvo in texto, "a linha da criação de imagem mudou; atualize o teste"
-    quebrado = texto.replace(alvo, "{ id, fullname, model: template, unlocked, wallpaper_locked }")
+    quebrado = texto.replace(alvo, "{ id, fullname, model: template, unlocked, wallpaper_locked, dashboard_hidden }")
 
     nomes = {nome for _, nome in usos_sem_declaracao(quebrado)}
     assert nomes == {"template"}, nomes
@@ -329,7 +341,8 @@ def test_nenhuma_tela_baixa_direto_do_servidor_de_arquivos():
     sabe isso é o servidor. Uma tela que lê `public_url` e a usa como destino
     entrega o arquivo velho — com a chave de boot anterior — quando a imagem foi
     regerada sem republicar."""
-    for tela in ("common/usb.js", "admin/app.js"):
+    telas = ["common/usb.js"] + [f"admin/{p.name}" for p in sorted((REPO / "web" / "admin").glob("*.js"))]
+    for tela in telas:
         js = (REPO / "web" / tela).read_text(encoding="utf-8")
         codigo = "\n".join(l for l in js.splitlines() if not l.lstrip().startswith("//"))
         assert "public_url ||" not in codigo, tela
@@ -347,6 +360,28 @@ def test_o_hotconfig_pergunta_o_que_pode_mandar():
     trecho = trecho[: trecho.index("async function sendCommand")]
     assert "catch" in trecho and "return" in trecho, "a consulta pode derrubar a tela"
     assert "b.disabled = true" in trecho
+
+
+def test_a_selecao_nao_reabilita_comando_travado():
+    """O render() reabilitava a barra inteira a cada seleção, desfazendo o que
+    desabilitarComandosBloqueados() tinha marcado."""
+    js = (REPO / "web" / "hotconfig" / "app.js").read_text(encoding="utf-8")
+    trecho = js[js.index("function render()") :]
+    trecho = trecho[: trecho.index("\n}\n")]
+    assert "bloqueados.has(" in trecho
+    assert "bloqueados.set(" in js[js.index("async function desabilitarComandosBloqueados") :]
+
+
+def test_a_frota_trava_so_as_maquinas_marcadas():
+    """Com só algumas máquinas marcadas, o painel da frota chamava a rota da
+    SEDE (que trava a sala inteira) para cada sede tocada, e a confirmação
+    mostrava o número menor. Máquina marcada vai pela rota dela; a da sede só
+    para sede marcada inteira."""
+    js = (REPO / "web" / "laboratorios" / "app.js").read_text(encoding="utf-8")
+    trecho = js[js.index("async function mandar(") :]
+    trecho = trecho[: trecho.index("\n}\n")]
+    assert "/machines/${" in trecho
+    assert 'alvo === "all"' in trecho
 
 
 def test_todo_arquivo_do_relatorio_tem_rotulo():
@@ -388,10 +423,17 @@ def test_virar_livre_solta_tambem_a_trava_propria_do_wallpaper():
     """A trava DA IMAGEM vence o `unlocked` (é a do convite, de propósito).
     Então o botão Livre do console manda as duas coisas — sem isso, "liberei a
     sede" deixava o wallpaper preso sem nada na tela explicando (o caso
-    26tete, visto em produção)."""
-    js = (REPO / "web" / "admin" / "app.js").read_text(encoding="utf-8")
-    trecho = js.split('t("make_official")')[1].split("load()")[0]
-    assert '{ unlocked: true, wallpaper_locked: false }' in trecho
+    26tete, visto em produção). Na página da imagem, escolher Livre desmarca a
+    trava, e o Salvar manda as duas mudanças."""
+    js = (REPO / "web" / "admin" / "imagem.js").read_text(encoding="utf-8")
+    trecho = js.split("perfil.onchange = () => {")[1].split("\n  };")[0]
+    assert 'perfil.value === "free"' in trecho and "r.wallpaper_locked = false" in trecho
+    salvar = js.split("salvar.onclick = acao(")[1]
+    assert 'mudancas.unlocked = r.perfil === "free"' in salvar
+    assert "mudancas.wallpaper_locked = r.wallpaper_locked" in salvar
+    # e na criação: Livre não sai com a trava ligada
+    criar = (REPO / "web" / "admin" / "imagens.js").read_text(encoding="utf-8")
+    assert "Boolean(v.wallpaper_locked) && !unlocked" in criar
 
 
 def test_a_identidade_da_sede_e_evidente_nas_duas_telas():
@@ -427,3 +469,96 @@ def test_o_overlay_do_zoom_respeita_o_hidden():
     e o fechar não fechava — o JS setava hidden e o CSS mantinha a tela."""
     css = (REPO / "web" / "dashboard" / "dash.css").read_text(encoding="utf-8")
     assert "[hidden]" in css and "!important" in css
+
+
+# --- a chave de admin lembrada pelo navegador -------------------------------
+
+
+@pytest.mark.parametrize("html", ["index.html", "admin/index.html"])
+def test_o_campo_da_chave_e_um_formulario_que_o_navegador_reconhece(html):
+    """O gerenciador de senhas só oferece salvar quando há <form>, um par
+    usuário/senha com autocomplete e um submit de verdade. autocomplete="off"
+    no campo de chave era exatamente o que impedia isso — e "a chave nunca é
+    lembrada" foi a reclamação. Invariante 14: o gerenciador do navegador é o
+    lugar certo para a chave; storage da página não é."""
+    texto = (REPO / "web" / html).read_text(encoding="utf-8")
+    forms = re.findall(r"<form[^>]*>(.*?)</form>", texto, re.S)
+    com_chave = [f for f in forms if 'autocomplete="current-password"' in f]
+    assert com_chave, "o campo da chave precisa estar num <form> com autocomplete=current-password"
+    form = com_chave[0]
+    assert 'autocomplete="username"' in form, "sem usuário o gerenciador não guarda o par"
+    assert re.search(r'<button[^>]*type="submit"', form), "o submit é o gatilho do prompt de salvar"
+    assert 'name="password"' in form
+    assert 'type="hidden"' not in form, "o Chrome ignora type=hidden como usuário; use texto escondido por CSS"
+    for campo in re.findall(r"<input[^>]*type=\"password\"[^>]*>", texto):
+        assert 'autocomplete="off"' not in campo, campo
+
+
+def test_a_home_mostra_a_sessao_e_o_enter_e_o_submit():
+    js = (REPO / "web" / "index.js").read_text(encoding="utf-8")
+    api = (REPO / "web" / "common" / "api.js").read_text(encoding="utf-8")
+    assert "export async function session(" in api
+    assert "api.session()" in js, "a home precisa perguntar se já há sessão"
+    assert "api.logout(" in js
+    assert 'onsubmit' in js
+    # o atalho antigo de Enter interceptava o submit do form
+    assert 'e.key === "Enter"' not in js
+    admin = (REPO / "web" / "admin" / "app.js").read_text(encoding="utf-8")
+    assert '$("#login").onsubmit' in admin
+    assert 'e.key === "Enter" && enter()' not in admin
+
+
+# Campos que chegam de fora do servidor: o nome da sede (sub-admin), o pedido de
+# imagem (um ANÔNIMO, pelo formulário público), o time do roster, o alerta e o
+# status (quem tem a chave de máquina escreve o que quiser).
+_DE_FORA = re.compile(
+    r"fullname|wanted_name|\.contact|\.note\b|vendor|\.detail|binding|teamLabel|"
+    r"e\.message|JSON\.stringify|\.hint|\.label\b|\bteam\b|\bquem\b|\bseat\b"
+)
+
+
+def test_texto_de_fora_nao_entra_cru_no_innerhtml():
+    """O pedido de imagem do formulário PÚBLICO era interpolado no `innerHTML`
+    do console: um anônimo rodava script na sessão do admin. Todo template com
+    marcação que interpola um campo de fora passa por `esc()`."""
+    ruins = []
+    WEB = REPO / "web"
+    for arq in sorted(WEB.rglob("*.js")):
+        texto = arq.read_text(encoding="utf-8")
+        for m in re.finditer(r"`([^`]*<[^`]*)`", texto, re.S):
+            for e in re.findall(r"\$\{((?:[^{}]|\{[^{}]*\})*)\}", m.group(1)):
+                if re.fullmatch(r'[\w.\s]+\?\s*"[^"]*"\s*:\s*"[^"]*"', e.strip()):
+                    continue  # ternário que só escolhe entre dois literais
+                if _DE_FORA.search(e) and "esc(" not in e and "t(" not in e.split("?")[0]:
+                    linha = texto[: m.start()].count("\n") + 1
+                    ruins.append(f"{arq.relative_to(WEB)}:{linha}: ${{{e.strip()[:60]}}}")
+    assert ruins == [], "\n".join(ruins)
+
+
+def test_o_padrao_de_lista_com_opcoes_nao_e_partido_na_virgula():
+    """INPUT_SOURCES tem vírgula DENTRO de cada valor ("('xkb','br')"): partir
+    o texto na vírgula quebrava "('xkb','latam'),('xkb','br')" em quatro
+    pedaços e o servidor recusava ("item inválido"). Lista com opções usa o
+    controle ordenado, como no configureitor."""
+    texto = (REPO / "web" / "admin" / "formulario.js").read_text(encoding="utf-8")
+    inicio = texto.index("function editorDePadrao(")
+    fim = texto.index("function editorDeLista(")
+    trecho = texto[inicio:fim]
+    assert "editorDeLista(f, aoMudar)" in trecho
+    assert 'f.type === "list" && (f.options || []).length' in trecho
+    # a caixa de texto partida na vírgula é só da lista LIVRE: a com opções
+    # já saiu pelo editorDeLista antes dela
+    if 'i.value.split(",")' in trecho:
+        assert trecho.index("editorDeLista(f, aoMudar)") < trecho.index('i.value.split(",")')
+
+
+def test_a_lista_livre_nao_parte_o_par_nome_ip_no_espaco():
+    """Cada item do FIREWALL_ALLOWLIST é o par "NOME IP", com um espaço dentro.
+    O editor do padrão partia o texto em vírgula E espaço: o par virava dois
+    itens, o servidor recusava o nome sozinho, e o padrão não salvava pelo
+    console."""
+    texto = (REPO / "web" / "admin" / "formulario.js").read_text(encoding="utf-8")
+    trecho = texto[texto.index("function editorDePadrao("):texto.index("function editorDeLista(")]
+    assert ".split(" in trecho
+    for m in re.finditer(r"\.split\(([^)]*)\)", trecho):
+        assert "\\s" not in m.group(1) and m.group(1).strip() != '" "', m.group(0)

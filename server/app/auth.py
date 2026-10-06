@@ -10,6 +10,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import secrets
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from fastapi import Header, HTTPException, Request
 
 from . import fsdb
 from .settings import settings
+from .errors import erro
+from .services import keyusage
 
 
 def new_key(prefix: str) -> str:
@@ -33,6 +36,15 @@ class Principal:
     name: str = ""
     scopes: set[str] = field(default_factory=set)
     images: list[str] = field(default_factory=list)  # globs (serviço)
+    # serviço com `labs:read`: de quem é a visão da frota que a chave segue
+    # (services/fleet_views.py); vazio = só os globs, como sempre foi
+    follow: str = ""
+    # admin: impressão digital da chave (o começo do hash). A sessão a guarda
+    # para morrer junto com ESTA chave, e não com qualquer uma de mesmo id
+    key_fp: str = ""
+    # True quando sessions.resolve acabou de estender a sessão: o cookie
+    # precisa ser reemitido nesta resposta (SessionCookieMiddleware)
+    sessao_renovada: bool = False
 
     @property
     def owner(self) -> str:
@@ -76,16 +88,19 @@ def identify(token: str | None, image_id: str | None = None) -> Principal | None
     admin = fsdb.read_json(settings.data_root / "keys" / "admin.json", {"keys": []})
     for entry in admin.get("keys", []):
         if secrets.compare_digest(th, entry.get("sha256", "")):
-            return Principal("admin", entry.get("id", "admin"))
+            keyusage.tocar("admin", th[:8])
+            return Principal("admin", entry.get("id", "admin"), key_fp=th[:8])
 
     services = fsdb.read_json(settings.data_root / "keys" / "services.json", {})
     for name, entry in services.items():
         if secrets.compare_digest(th, entry.get("sha256", "")):
+            keyusage.tocar("service", name)
             return Principal(
                 "service",
                 name,
                 scopes=set(entry.get("scopes", [])),
                 images=list(entry.get("images", [])),
+                follow=str(entry.get("follow") or ""),
             )
 
     if image_id:
@@ -119,6 +134,16 @@ def identify_machine(machine_key: str | None, image_id: str) -> Principal | None
         return None
     stored = (fsdb.read_text(_site_image_dir(image_id) / "machine.key") or "").strip()
     if stored and secrets.compare_digest(machine_key.strip(), stored):
+        return Principal("machine", image_id)
+    # Só no descasamento (o caminho quente não muda): a chave anterior, durante
+    # a carência de uma rotação. A máquina ligada só troca de chave no boot.
+    prev = fsdb.read_json(_site_image_dir(image_id) / "machine.key.prev")
+    if (
+        prev
+        and prev.get("key")
+        and time.time() < float(prev.get("valid_until") or 0)
+        and secrets.compare_digest(machine_key.strip(), str(prev["key"]))
+    ):
         return Principal("machine", image_id)
     return None
 
@@ -156,7 +181,7 @@ def check_boot_key(image_id: str, key: str | None) -> bool:
 
 
 def _unauthorized() -> HTTPException:
-    return HTTPException(401, "credencial ausente ou inválida")
+    return erro(401, "unauthorized", "credencial ausente ou inválida")
 
 
 # Cabeçalho que a autenticação por COOKIE exige. Um <form> de outro site não
@@ -191,7 +216,12 @@ def principal(request: Request | None, authorization: str | None, image_id: str 
 
     from .services import sessions
 
-    return sessions.resolve(request.cookies.get(sessions.COOKIE, ""))
+    sid = request.cookies.get(sessions.COOKIE, "")
+    p = sessions.resolve(sid)
+    if p is not None and p.sessao_renovada:
+        # vive em scope["state"]; o middleware põe o Set-Cookie na resposta
+        request.state.reemitir_cookie = sid
+    return p
 
 
 def principal_de_link(request: Request, tk: str = "", image_id: str | None = None):
@@ -209,8 +239,23 @@ def principal_de_link(request: Request, tk: str = "", image_id: str | None = Non
     if p is None:
         from .services import sessions
 
-        p = sessions.resolve(request.cookies.get(sessions.COOKIE, ""))
+        # sem renovar: <img>/<a download> não recebem cookie de volta, e
+        # renovar em disco aqui consumiria a renovação do dia sem reemitir nada
+        p = sessions.resolve(request.cookies.get(sessions.COOKIE, ""), renovar=False)
     return p
+
+
+def recusa_de_console(p: Principal | None) -> HTTPException:
+    """A recusa certa para quem bateu numa rota do console.
+
+    Chave de serviço VÁLIDA levava 401 "credencial ausente ou inválida", e o
+    preflight do MOJ concluía que a chave estava errada. 401 é só para
+    credencial que não vale; a que vale e não pode é 403, com o código que diz
+    por quê. (Sub-admin em rota só de admin continua 401: é a invariante 11,
+    o console não confirma o que existe para quem não é dono.)"""
+    if p is not None and p.kind == "service":
+        return erro(403, "console_only", "esta rota é do console; chave de serviço não entra")
+    return _unauthorized()
 
 
 async def require_admin(
@@ -218,7 +263,7 @@ async def require_admin(
 ) -> Principal:
     p = principal(request, authorization)
     if not p or p.kind != "admin":
-        raise _unauthorized()
+        raise recusa_de_console(p)
     return p
 
 
@@ -236,16 +281,39 @@ async def require_console(
     p = principal(request, authorization)
     if p and p.kind in ("admin", "subadmin"):
         return p
+    if p is not None and p.kind == "service":
+        # antes do limitador: chave válida não é tentativa de adivinhar código,
+        # e não pode gastar o balde do IP (o MOJ levava 429 por perguntar)
+        raise recusa_de_console(p)
     ip = ratelimit.client_ip(request)
-    if not ratelimit.allow(f"console:{ip}", rate=0.2, burst=10):
-        raise HTTPException(429, "muitas tentativas; tente de novo em instantes")
+    ratelimit.exigir(f"console:{ip}", rate=0.2, burst=10)
     raise _unauthorized()
 
 
-def require_image_access(*, service_scope: str | None = None, allow_machine: bool = False):
+async def require_console_or_service(
+    request: Request, authorization: str | None = Header(None)
+) -> Principal:
+    """Console, ou qualquer chave de serviço válida: as poucas rotas em que o
+    integrador precisa se enxergar (`/whoami`, a lista de imagens)."""
+    p = principal(request, authorization)
+    if p is not None and p.kind == "service":
+        return p
+    return await require_console(request, authorization)
+
+
+# Para `service_scope`: qualquer chave de serviço válida cujo glob cubra a
+# imagem, sem escopo específico.
+QUALQUER = "*"
+
+
+def require_image_access(
+    *, service_scope: str | tuple[str, ...] | None = None, allow_machine: bool = False
+):
     """Dependência para rotas /images/{image}: aceita admin, token da própria
-    imagem e, se `service_scope`, serviço com o escopo; `allow_machine` aceita
-    a chave de máquina da imagem (header X-NB-Machine-Key)."""
+    imagem e, se `service_scope`, serviço com o escopo (uma tupla = qualquer um
+    deles; `QUALQUER` = toda chave válida); `allow_machine` aceita a chave de
+    máquina da imagem (header X-NB-Machine-Key)."""
+    escopos = (service_scope,) if isinstance(service_scope, str) else tuple(service_scope or ())
 
     async def dep(
         image: str,
@@ -267,18 +335,69 @@ def require_image_access(*, service_scope: str | None = None, allow_machine: boo
             # serviço é credencial que a administração emitiu (o MOJ): erro
             # claro vale mais que sigilo, e quem integra precisa distinguir
             # "faltou escopo" de "essa sala não é sua"
-            if service_scope is None or service_scope not in p.scopes:
-                raise HTTPException(403, "escopo insuficiente")
+            if not escopos or (QUALQUER not in escopos and not p.scopes.intersection(escopos)):
+                raise erro(403, "insufficient_scope", "escopo insuficiente")
             if not _site_image_dir(image).is_dir():
-                raise HTTPException(404, "imagem não existe")
+                raise erro(404, "image_not_found", "imagem não existe")
             if not p.can_see_image(image):
-                raise HTTPException(403, "sem acesso a esta imagem")
+                raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
             return p
         # invariante 11: para quem entra pelo console (ou com token de outra
         # imagem), o que não é seu não existe. Um 403 aqui viraria oráculo de
         # nomes de sala — e são ~26 rotas herdando esta dependência.
         if not _site_image_dir(image).is_dir() or not p.can_see_image(image):
-            raise HTTPException(404, "imagem não existe")
+            raise erro(404, "image_not_found", "imagem não existe")
+        return p
+
+    return dep
+
+
+def conferir_reauth(p: Principal, request: Request, authorization: str | None, current_key) -> None:
+    """Para as rotas que cunham ou matam chave de ADMIN: prova de posse da
+    chave, não só da sessão.
+
+    O cookie prova que alguém entrou neste navegador; não prova que quem está
+    clicando agora é essa pessoa (aba aberta, sessão de 30 dias), e um script
+    injetado na tela do admin usaria a sessão para cunhar uma chave que
+    sobrevive a ela. Quem vem por Bearer já provou a posse na própria
+    requisição. Quem vem por cookie redigita a chave, e ela tem de ser a MESMA
+    da sessão (id e impressão digital).
+
+    A recusa é 403, não 401: 401 faria a tela concluir que a sessão morreu."""
+    from .services import audit, ratelimit
+
+    via_bearer = identify(_bearer(authorization))
+    if via_bearer is not None and via_bearer.kind == "admin":
+        return
+    q = identify(str(current_key or "").strip()) if current_key else None
+    if q is not None and q.kind == "admin" and q.name == p.name and (not p.key_fp or q.key_fp == p.key_fp):
+        return
+    audit.registrar(p, request, "reauth.failed")
+    ratelimit.exigir(f"reauth:{ratelimit.client_ip(request)}", rate=0.1, burst=5)
+    raise erro(403, "reauth_required", "confirme com a sua chave de administração")
+
+
+def require_admin_or_service(scope: str):
+    """Rota de uma imagem que é da ADMINISTRAÇÃO (sub-admin e token da sede não
+    entram) e que uma chave de serviço com `scope` também alcança, dentro do
+    glob dela. É o caso dos webhooks."""
+
+    async def dep(
+        image: str, request: Request = None, authorization: str | None = Header(None)
+    ) -> Principal:
+        p = principal(request, authorization)
+        if p is not None and p.kind == "service":
+            if scope not in p.scopes:
+                raise erro(403, "insufficient_scope", "escopo insuficiente")
+            if not _site_image_dir(image).is_dir():
+                raise erro(404, "image_not_found", "imagem não existe")
+            if not p.can_see_image(image):
+                raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
+            return p
+        if not p or p.kind != "admin":
+            raise _unauthorized()
+        if not _site_image_dir(image).is_dir():
+            raise erro(404, "image_not_found", "imagem não existe")
         return p
 
     return dep
@@ -287,7 +406,7 @@ def require_image_access(*, service_scope: str | None = None, allow_machine: boo
 def require_machine(image: str, x_nb_machine_key: str | None) -> Principal:
     """Só a chave de máquina da imagem (telemetria/fila)."""
     if not _site_image_dir(image).is_dir():
-        raise HTTPException(404, "imagem não existe")
+        raise erro(404, "image_not_found", "imagem não existe")
     p = identify_machine(x_nb_machine_key, image)
     if not p:
         raise _unauthorized()

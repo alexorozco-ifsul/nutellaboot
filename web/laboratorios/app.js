@@ -10,6 +10,8 @@
 // expande — aí sim pela rota que já existe.
 import * as api from "/common/api.js";
 import { init, t, apply } from "/common/i18n.js";
+import { esc } from "/common/ui.js";
+import { montarSeletor } from "/common/fleetview.js";
 
 const $ = (s) => document.querySelector(s);
 
@@ -36,10 +38,12 @@ const FILTRO_LABEL = {
 
 const KIND_LABEL = {
   "usb.storage": "usb_storage",
+  "identity.duplicate": "identity_duplicate",
   "usb.phone": "usb_phone",
   "usb.network": "usb_network",
   "usb.other": "usb_other",
   "media.cd": "media_cd",
+  "display.multiple": "display_multiple",
 };
 
 function hora(ts) {
@@ -67,10 +71,10 @@ function renderAlertas() {
     row.href = hotconfigUrl(a.sede);
     row.target = "_blank";
     row.rel = "noopener";
-    row.innerHTML = `<b class="fasede">${a.sede}</b>
+    row.innerHTML = `<b class="fasede">${esc(a.sede)}</b>
       <span class="awhat">${t(KIND_LABEL[a.kind] || "usb_other")}</span>
-      <span class="amac">${a.team ? `${a.team} · ` : ""}${a.mac || ""}</span>
-      <span class="fadet">${a.vendor || a.detail || ""}</span>
+      <span class="amac">${a.team ? `${esc(a.team)} · ` : ""}${esc(a.mac)}</span>
+      <span class="fadet">${esc(a.vendor || a.detail)}</span>
       <span class="awhen">${hora(a.at)}</span>`;
     lista.appendChild(row);
   }
@@ -84,7 +88,43 @@ function toast(msg, isErro = false) {
   setTimeout(() => el.remove(), 5000);
 }
 
+// "mostrar todas sem salvar": a olhada, que não mexe na visão gravada. As
+// sedes de fora da visão aparecem esmaecidas, e é marcando-as (e gravando
+// "escolhidas à mão") que elas entram.
+let olharTodas = false;
+let dentroDaVisao = null; // ids da visão gravada, só enquanto se olha todas
+
+function rotuloDoDono(s) {
+  if (s.owner_kind !== "subadmin") return t("owner_admin");
+  return s.owner_label || s.owner_ref || "";
+}
+
+function preencherFiltroDeDonos() {
+  const sel = $("#ownerfilter");
+  const vistos = new Map();
+  for (const s of sites) {
+    if (s.owner_ref && !vistos.has(s.owner_ref)) vistos.set(s.owner_ref, rotuloDoDono(s));
+  }
+  // com um dono só (o sub-admin, ou o admin em "minhas") o filtro é ruído
+  sel.hidden = vistos.size < 2;
+  const antes = sel.value;
+  sel.innerHTML = "";
+  const todos = document.createElement("option");
+  todos.value = "";
+  todos.textContent = t("owner_filter_all");
+  sel.appendChild(todos);
+  for (const [ref, rotulo] of vistos) {
+    const o = document.createElement("option");
+    o.value = ref;
+    o.textContent = rotulo;
+    sel.appendChild(o);
+  }
+  if (vistos.has(antes)) sel.value = antes;
+}
+
 function combina(s) {
+  const dono = $("#ownerfilter").value;
+  if (dono && s.owner_ref !== dono) return false;
   const q = $("#search").value.trim().toLowerCase();
   if (q && !`${s.id} ${s.fullname}`.toLowerCase().includes(q)) return false;
   if (filtro === "alert") return s.alerts > 0;
@@ -136,15 +176,18 @@ function render() {
 
   for (const s of lista) {
     const tr = document.createElement("tr");
-    tr.className = "sede" + (sedesSel.has(s.id) ? " sel" : "");
+    const fora = dentroDaVisao !== null && !dentroDaVisao.has(s.id);
+    tr.className = "sede" + (sedesSel.has(s.id) ? " sel" : "") + (fora ? " row-outside" : "");
     const marcadas = macsDa(s.id).size;
     tr.innerHTML =
       `<td class="expandir"><button type="button">${expandidas.has(s.id) ? "▾" : "▸"}</button></td>
-       <td class="nome"><span class="sedeid">${s.id}</span>
-         <a class="gohot" href="${hotconfigUrl(s.id)}" target="_blank" rel="noopener"
+       <td class="nome"><span class="sedeid">${esc(s.id)}</span>
+         <a class="gohot" href="${esc(hotconfigUrl(s.id))}" target="_blank" rel="noopener"
             title="${t("fleet_open_hotconfig")}">\u2197</a>
          ${marcadas ? `<span class="sedenome"> · ${marcadas} ${t("fleet_picked")}</span>` : ""}
-         <br><span class="sedenome">${s.fullname || ""}</span></td>` +
+         <br><span class="sedenome">${esc(s.fullname)}</span>${
+           s.owner_kind === "subadmin" ? ` <span class="pill">${esc(rotuloDoDono(s))}</span>` : ""
+         }</td>` +
       num(s.machines) + num(s.active) + num(s.new) + num(s.online) +
       num(s.locked, "ntrava") + num(s.alerts, "nalerta");
 
@@ -201,8 +244,8 @@ function linhaMaquinas(s) {
       const linha = document.createElement("div");
       linha.className = "farow";
       linha.innerHTML = `<span class="awhat">${t(KIND_LABEL[a.kind] || "usb_other")}</span>
-        <span class="amac">${a.mq.binding?.name ? `${a.mq.binding.name} · ` : ""}${a.mq.mac}</span>
-        <span class="fadet">${a.vendor || a.detail || ""}</span>
+        <span class="amac">${a.mq.binding?.name ? `${esc(a.mq.binding.name)} · ` : ""}${esc(a.mq.mac)}</span>
+        <span class="fadet">${esc(a.vendor || a.detail)}</span>
         <span class="awhen">${hora(a.at)}</span>`;
       bloco.appendChild(linha);
     }
@@ -217,8 +260,8 @@ function linhaMaquinas(s) {
       "mchip" + (marcado ? " sel" : "") + (mq.online ? "" : " off") +
       ((mq.alerts || []).length ? " alerta" : "");
     const time = mq.binding?.name || mq.binding?.user_id || "";
-    chip.innerHTML = `<span class="mac">${mq.mac}</span>${
-      time ? `<span class="time">${time}</span>` : ""
+    chip.innerHTML = `<span class="mac">${esc(mq.mac)}</span>${
+      time ? `<span class="time">${esc(time)}</span>` : ""
     }${mq.lock?.locked ? "🔒" : ""}`;
     chip.onclick = () => {
       // escolher máquina a máquina desmarca a sede inteira: os dois juntos
@@ -250,8 +293,17 @@ async function carregarMaquinas(sede) {
 
 async function carregar() {
   try {
-    const d = await api.get(`/api/v1/labs?dias=${dias}`, { kind: "admin" });
+    const d = await api.get(`/api/v1/labs?dias=${dias}${olharTodas ? "&view=all" : ""}`, { kind: "admin" });
     sites = d.sites || [];
+    if (olharTodas) {
+      // quem está DENTRO da visão gravada (o resto sai esmaecido). Custa um
+      // pedido a mais, barato: o resumo é guardado por sede no servidor.
+      const gravada = await api.get(`/api/v1/labs?dias=${dias}`, { kind: "admin" });
+      dentroDaVisao = new Set((gravada.sites || []).map((s) => s.id));
+    } else {
+      dentroDaVisao = null;
+    }
+    preencherFiltroDeDonos();
   } catch (e) {
     $("#empty").textContent = `${t("error")}: ${e.message}`;
     return;
@@ -323,13 +375,34 @@ async function mandar(cmd) {
         if (motivo) toast(`${sede}: ${motivo}`, true);
       }
     } else {
-      const sedes = Object.keys(targets);
-      await Promise.all(
-        sedes.map((sede) =>
-          api.post(`/api/v1/site-images/${encodeURIComponent(sede)}/${cmd}`, {}, { kind: "admin" })
-        )
+      // A rota da sede trava a sala INTEIRA: só vale para a sede marcada
+      // inteira. Máquina marcada uma a uma vai pela rota dela. Mandar a da sede
+      // com seleção parcial travava todo mundo, e a confirmação acima mostrava
+      // o número menor.
+      const pedidos = [];
+      for (const [sede, alvo] of Object.entries(targets)) {
+        const base = `/api/v1/site-images/${encodeURIComponent(sede)}`;
+        if (alvo === "all") {
+          pedidos.push({ sede, url: `${base}/${cmd}` });
+        } else {
+          for (const mac of alvo) {
+            pedidos.push({ sede, url: `${base}/machines/${encodeURIComponent(mac)}/${cmd}` });
+          }
+        }
+      }
+      const res = await Promise.allSettled(pedidos.map((x) => api.post(x.url, {}, { kind: "admin" })));
+      let feitas = 0;
+      const falhas = new Set();
+      res.forEach((r, i) => {
+        if (r.status === "fulfilled") feitas += r.value.machines || 0;
+        else falhas.add(pedidos[i].sede);
+      });
+      toast(
+        falhas.size
+          ? t("fleet_partial", { n: feitas, falhas: [...falhas].join(", ") })
+          : t("command_sent", { n: feitas }),
+        falhas.size > 0
       );
-      toast(t("command_sent", { n }));
     }
     carregar();
   } catch (e) {
@@ -433,7 +506,7 @@ function renderRelatorio() {
     } else {
       a.setAttribute("download", "");
     }
-    a.innerHTML = `<span>${t(ARQ_LABEL[f.name] || f.name)}</span><span class="tam">${tamanho(
+    a.innerHTML = `<span>${esc(t(ARQ_LABEL[f.name] || f.name))}</span><span class="tam">${tamanho(
       f.size || 0
     )}</span>`;
     arquivos.appendChild(a);
@@ -494,6 +567,13 @@ async function main() {
   renderFiltros();
   atualizarCsv();
   $("#search").oninput = render;
+  $("#ownerfilter").onchange = render;
+  $("#viewall").onchange = () => {
+    olharTodas = $("#viewall").checked;
+    carregar();
+  };
+  // "escolhidas à mão" grava as sedes marcadas nesta tela
+  montarSeletor($("#fview"), { escolhidas: () => [...sedesSel], aoMudar: carregar });
   $("#dias").onchange = () => {
     dias = Number($("#dias").value);
     atualizarCsv();

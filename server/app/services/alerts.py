@@ -33,7 +33,15 @@ TIPOS = (
     # disco inserido num drive óptico — que costuma ser interno, e por isso
     # não é `usb.*`. Ter o leitor não alarma; pôr um disco nele, sim.
     "media.cd",
+    # mais monitores acesos que o permitido (campo MAXMONITORS). Exceção à
+    # regra de mudança de estado: vale também para o que já estava ligado no
+    # boot, porque um segundo monitor já ligado é justamente o caso
+    "display.multiple",
+    # o servidor mesmo: duas máquinas da sede reportaram o mesmo machine-id
+    # (home clonada, imagem de disco) — confunde tudo que usa o id como chave
+    "identity.duplicate",
 )
+IDENTIDADE = "identity.duplicate"
 
 MAX_ABERTOS = 50  # por máquina; acima disso o mais antigo cede lugar
 HISTORICO = 256 * 1024
@@ -47,8 +55,19 @@ def open_alerts(image_id: str, mac: str) -> list[dict]:
     return fsdb.read_json(_path(image_id, mac), []) or []
 
 
+def _mesmo(a: dict, b: dict) -> bool:
+    return all(a.get(k) == b.get(k) for k in ("kind", "detail", "vendor"))
+
+
 def raise_alert(image_id: str, mac: str, kind: str, detail: str = "", extra: dict | None = None) -> dict:
-    """Registra um alerta novo. Devolve o alerta criado."""
+    """Registra um alerta novo. Devolve o alerta criado.
+
+    Um alerta IGUAL (kind, detail, vendor) ainda aberto na mesma máquina não
+    é repetido: devolve o que já existe, com `repeated: True` (só na
+    resposta; nada é gravado). O alerta é um estado que espera ação humana —
+    o mesmo pendrive reconectado, ou um celular que renegocia o MTP a cada
+    minuto, não é uma mudança de estado nova enquanto ninguém dispensou o
+    anterior; era assim que a faixa vermelha virava uma parede."""
     kind = str(kind or "usb.other")[:40]
     alerta = {
         "id": secrets.token_hex(6),
@@ -61,6 +80,9 @@ def raise_alert(image_id: str, mac: str, kind: str, detail: str = "", extra: dic
     d = machine_dir(image_id, mac)
     with fsdb.locked(d):
         abertos = fsdb.read_json(d / "alerts.json", []) or []
+        igual = next((a for a in abertos if _mesmo(a, alerta)), None)
+        if igual is not None:
+            return {**igual, "repeated": True}
         abertos.append(alerta)
         fsdb.write_json(d / "alerts.json", abertos[-MAX_ABERTOS:])
     append_capped(
@@ -111,6 +133,26 @@ def list_open(image_id: str) -> list[dict]:
     for mac in list_macs(image_id):
         todos += open_alerts(image_id, mac)
     return sorted(todos, key=lambda a: a.get("at", 0), reverse=True)
+
+
+def history_da_sede(image_id: str, since: float = 0, linhas: int = 500) -> list[dict]:
+    """O histórico de TODAS as máquinas da sede, do mais recente para o mais
+    antigo. É a prova documental de um incidente (quem dispensou o quê, quando)
+    que só saía no CSV do relatório da frota."""
+    from .machines import list_macs
+
+    # a linha "dismissed" guarda o `at` do alerta; o instante dela é `dismissed_at`
+    def quando(a):
+        return float(a.get("dismissed_at") if a.get("event") == "dismissed" else a.get("at") or 0)
+
+    out = []
+    for mac in list_macs(image_id):
+        for a in history(image_id, mac, linhas):
+            if since and quando(a) < since:
+                continue
+            out.append({"mac": mac, **a})
+    out.sort(key=quando, reverse=True)
+    return out[:linhas]
 
 
 def history(image_id: str, mac: str, linhas: int = 200) -> list[dict]:

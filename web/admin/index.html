@@ -10,213 +10,68 @@
 <body>
 <header class="topbar">
   <h1 data-i18n="admin_title"></h1>
+  <span id="quem" class="sub hidden"></span>
   <span class="spacer"></span>
-  <!-- só aparece depois de entrar: sem sessão a tela da frota responde 401 -->
-  <a id="gofrota" class="btn small primary hidden" href="/laboratorios/" data-i18n="fleet_title"></a>
+  <!-- só aparecem depois de entrar: sem sessão, a frota responde 401 -->
+  <span id="healthinfo" class="sub hidden"></span>
+  <a id="gofrota" class="btn small hidden" href="/laboratorios/" data-i18n="fleet_title"></a>
+  <a id="godash" class="btn small hidden" href="/dashboard/" target="_blank" rel="noopener" data-i18n="fleet_dashboard"></a>
   <button type="button" id="logout" class="small hidden" data-i18n="admin_logout"></button>
   <span id="lang"></span>
 </header>
 
 <main class="wide">
-  <div class="card" id="login">
+  <!-- <form> de verdade, com o par usuário/senha que o gerenciador de senhas
+       do navegador reconhece (o mesmo da home, para o autofill valer nas duas) -->
+  <form class="card" id="login" method="post" action="/api/v1/session">
     <h2 data-i18n="admin_key"></h2>
     <p class="help muted" data-i18n="admin_key_help"></p>
+    <input type="text" id="login_user" name="username" autocomplete="username" value="admin"
+           readonly tabindex="-1" aria-hidden="true" class="vh">
     <div class="actions">
-      <input type="password" id="key" style="max-width:420px" autocomplete="off">
-      <button type="button" id="enter" class="primary" data-i18n="admin_enter"></button>
+      <div class="pwd" style="max-width:420px">
+        <input type="password" id="key" name="password" autocomplete="current-password" spellcheck="false" required>
+        <button type="button" class="eye" id="key_eye" aria-pressed="false">👁</button>
+      </div>
+      <button type="submit" id="enter" class="primary" data-i18n="admin_enter"></button>
     </div>
-  </div>
+  </form>
 
   <div id="panel" class="hidden">
-    <div class="card" id="whocard" style="border-color:var(--accent)">
-      <h2><span id="who_label"></span> <span id="who_kind" class="pill"></span></h2>
-      <p class="help muted" id="who_help"></p>
-      <div id="who_quotas" class="muted mono"></div>
-    </div>
-
-    <!-- A porta para a frota. Era um botão do tamanho do "sair" na barra de
-         cima, e ninguém achava. -->
-    <div class="card" id="frotacard" style="border-color:var(--ok)">
-      <h2 data-i18n="fleet_card_title"></h2>
-      <p class="help muted" data-i18n="fleet_card_help"></p>
-      <div class="actions">
-        <a class="btn primary" href="/laboratorios/" data-i18n="fleet_card_go"></a>
-        <a class="btn" href="/dashboard/" target="_blank" rel="noopener" data-i18n="fleet_dashboard"></a>
-        <button type="button" class="btn" id="sharedash" data-i18n="dash_share_make"></button>
-      </div>
-      <p class="help muted" data-i18n="dash_share_help"></p>
-      <div id="shareout" class="hidden">
-        <input type="text" id="shareurl" readonly style="width:100%;font-family:ui-monospace,monospace">
-        <p class="help muted" data-i18n="dash_share_once"></p>
-      </div>
-      <div id="sharelist"></div>
-    </div>
-
-    <div class="card">
-      <h2 data-i18n="models_section"></h2>
-      <p class="help muted" data-i18n="models_section_help"></p>
-      <div class="actions" style="flex-wrap:wrap;gap:12px;align-items:flex-end">
-        <label class="fld" style="max-width:220px"><span data-i18n="model_name"></span>
-          <input type="text" id="mod_name" placeholder="meulab2026"></label>
-        <label class="fld" style="flex:1;min-width:200px"><span data-i18n="model_description"></span>
-          <input type="text" id="mod_desc"></label>
-        <label class="fld" style="max-width:260px"><span data-i18n="model_from"></span>
-          <select id="mod_from"></select></label>
-        <button type="button" id="mod_create" class="primary" data-i18n="model_create"></button>
-      </div>
-      <p class="help muted" data-i18n="model_from_help"></p>
-      <div id="modlist" class="muted" style="margin-top:12px" data-i18n="loading"></div>
-      <div id="modpanel" style="margin-top:14px"></div>
-    </div>
-
-    <div class="card">
-      <h2 data-i18n="new_image"></h2>
-      <div class="field">
-        <div class="flabel" data-i18n="image_id"></div>
-        <div class="help" data-i18n="image_id_help"></div>
-        <input type="text" id="newid" style="max-width:320px">
-      </div>
-      <div class="field">
-        <div class="flabel" data-i18n="image_name"></div>
-        <input type="text" id="newname">
-      </div>
-      <div class="field">
-        <div class="flabel" data-i18n="template"></div>
-        <select id="newtpl" style="max-width:320px"></select>
-      </div>
-      <div class="field">
-        <div class="flabel" data-i18n="profile"></div>
-        <div class="help" data-i18n="profile_help"></div>
-        <select id="newprofile" style="max-width:320px">
-          <option value="official" data-i18n="profile_official"></option>
-          <option value="free" data-i18n="profile_free"></option>
-        </select>
-      </div>
-      <div class="field">
-        <div class="flabel" data-i18n="wallpaper_at_creation"></div>
-        <input type="file" id="newwall" accept="image/png,image/jpeg">
-        <label style="display:block;margin-top:8px">
-          <input type="checkbox" id="newwalllock">
-          <span data-i18n="wallpaper_lock_label"></span>
-        </label>
-      </div>
-      <div class="actions">
-        <button type="button" id="create" class="primary" data-i18n="create"></button>
-        <span id="createstatus" class="muted"></span>
-      </div>
-    </div>
-
-    <div class="card" data-admin-only>
-      <h2 data-i18n="bulk"></h2>
-      <p class="help muted" data-i18n="bulk_help"></p>
-      <textarea id="bulktsv" spellcheck="false"
-        placeholder="26brbr&#9;Brazilian Finals&#9;maratonalinux2404"></textarea>
-      <div class="actions" style="margin-top:10px">
-        <button type="button" id="bulkgo" class="primary" data-i18n="bulk_create"></button>
-        <button type="button" id="bulkcsv" class="hidden" data-i18n="download_csv"></button>
-        <span id="bulkstatus" class="muted"></span>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2><span data-i18n="images"></span> <span id="imgcount" class="muted"></span></h2>
-      <div class="actions" style="margin-bottom:10px">
-        <input type="text" id="filter" data-i18n-placeholder="search" style="max-width:260px">
-        <button type="button" id="reload" class="small" data-i18n="refresh"></button>
-      </div>
-      <div id="imglist" class="muted" data-i18n="loading"></div>
-    </div>
-
-    <div class="card" data-admin-only>
-      <h2 data-i18n="invites"></h2>
-      <p class="help muted" data-i18n="invites_help"></p>
-      <div class="actions" style="flex-wrap:wrap; gap:12px; align-items:flex-end">
-        <label class="fld" style="max-width:120px"><span data-i18n="invite_count"></span>
-          <input type="number" id="inv_count" value="1" min="1"></label>
-        <label class="fld" style="max-width:140px"><span data-i18n="invite_max_images"></span>
-          <input type="number" id="inv_max" value="1" min="1"></label>
-        <label class="fld" style="max-width:170px"><span data-i18n="invite_build_quota"></span>
-          <input type="number" id="inv_quota" value="5" min="0"></label>
-        <label class="fld" style="max-width:200px"><span data-i18n="create_template"></span>
-          <select id="inv_tpl"></select></label>
-        <label class="fld" style="max-width:220px"><span data-i18n="profile"></span>
-          <select id="inv_profile">
-            <option value="free" data-i18n="profile_free"></option>
-            <option value="official" data-i18n="profile_official"></option>
-          </select></label>
-        <label class="fld" style="flex:1; min-width:160px"><span data-i18n="request_note"></span>
-          <input type="text" id="inv_note"></label>
-        <button type="button" id="inv_gen" class="primary" data-i18n="invite_generate"></button>
-      </div>
-      <div id="invlist" class="muted" style="margin-top:12px" data-i18n="loading"></div>
-    </div>
-
-    <div class="card" data-admin-only>
-      <h2 data-i18n="requests_admin"></h2>
-      <div id="reqlist" class="muted" data-i18n="loading"></div>
-    </div>
-
-    <div class="card">
-      <h2 data-i18n="layers_section"></h2>
-      <p class="help muted" data-i18n="layers_section_help"></p>
-      <div class="tabs" style="display:flex;gap:8px;margin-bottom:14px">
-        <button type="button" id="ltab_tpl" class="small on" data-i18n="layer_by_template"></button>
-        <button type="button" id="ltab_img" class="small" data-i18n="layer_by_image"></button>
-      </div>
-
-      <div id="lpane_tpl">
-        <div class="actions" style="flex-wrap:wrap;gap:12px;align-items:flex-end">
-          <label class="fld" style="max-width:200px"><span data-i18n="layer_name"></span>
-            <input type="text" id="lay_name" placeholder="mono"></label>
-          <label class="fld" style="max-width:220px"><span data-i18n="template"></span>
-            <select id="lay_tpl"></select></label>
-          <label class="fld" style="flex:1;min-width:220px"><span data-i18n="layer_packages"></span>
-            <input type="text" id="lay_pkgs" placeholder="htop tmux"></label>
-          <button type="button" id="lay_build" class="primary" data-i18n="layer_build"></button>
-        </div>
-        <div class="field">
-          <div class="flabel" data-i18n="layer_attach_to"></div>
-          <div id="lay_images" class="list-editor" style="max-height:160px;overflow:auto"></div>
-        </div>
-      </div>
-
-      <div id="lpane_img" class="hidden">
-        <div class="actions" style="flex-wrap:wrap;gap:12px;align-items:flex-end">
-          <label class="fld" style="max-width:220px"><span data-i18n="image"></span>
-            <select id="layi_img"></select></label>
-          <label class="fld" style="max-width:200px"><span data-i18n="layer_name"></span>
-            <input type="text" id="layi_name" placeholder="spim"></label>
-          <label class="fld" style="flex:1;min-width:220px"><span data-i18n="layer_packages"></span>
-            <input type="text" id="layi_pkgs" placeholder="spim"></label>
-          <button type="button" id="layi_build" class="primary" data-i18n="layer_build"></button>
-        </div>
-      </div>
-
-      <div id="laylist" class="muted" style="margin-top:12px" data-i18n="layer_none"></div>
-    </div>
-
-    <div class="card" data-admin-only>
-      <h2 data-i18n="usb_section"></h2>
-      <p class="help muted" data-i18n="usb_section_help"></p>
-      <div class="actions">
-        <button type="button" id="usb_build" class="small" data-i18n="usb_regenerate"></button>
-        <span id="usb_info" class="muted"></span>
-      </div>
-      <div id="usbstate" class="muted" style="margin-top:10px" data-i18n="loading"></div>
-    </div>
-
-    <div class="card" data-admin-only>
-      <h2 data-i18n="publish_section"></h2>
-      <p class="help muted" data-i18n="publish_help"></p>
-      <div class="actions">
-        <button type="button" id="pub_retry" class="small" data-i18n="publish_retry"></button>
-        <span id="pub_info" class="muted"></span>
-      </div>
-      <div id="publist" class="muted" style="margin-top:10px" data-i18n="publish_none"></div>
-    </div>
-
+    <!-- Um assunto por aba. As três de baixo são só da administração: o
+         sub-admin nem as vê, e o endereço delas o leva de volta a Imagens. -->
+    <nav id="abas" class="tabs">
+      <a href="#imagens" data-aba="imagens" data-i18n="nav_images"></a>
+      <a href="#modelos" data-aba="modelos" data-i18n="nav_models"></a>
+      <a href="#camadas" data-aba="camadas" data-i18n="nav_layers"></a>
+      <a href="#pessoas" data-aba="pessoas" data-admin-only data-i18n="nav_people"></a>
+      <a href="#chaves" data-aba="chaves" data-admin-only data-i18n="nav_keys"></a>
+      <a href="#sistema" data-aba="sistema" data-admin-only data-i18n="nav_system"></a>
+    </nav>
+    <p id="cota" class="help hidden"></p>
+    <div id="vista"></div>
   </div>
 </main>
+
+<!-- Depois do painel, de propósito: o formulário de login continua sendo o
+     primeiro <form> com campo de senha da página (é o que o gerenciador de
+     senhas preenche, e o que os testes conferem). Estático porque o
+     gerenciador de senhas precisa encontrá-lo. -->
+<dialog id="reauth" class="dlg">
+  <form id="reauth_form" method="dialog">
+    <h2 data-i18n="reauth_title"></h2>
+    <p class="help" data-i18n="reauth_help"></p>
+    <input type="text" name="username" autocomplete="username" value="admin"
+           readonly tabindex="-1" aria-hidden="true" class="vh">
+    <input type="password" id="reauth_key" name="password" autocomplete="current-password"
+           spellcheck="false" required>
+    <p id="reauth_err" class="msg bad hidden" data-i18n="reauth_bad"></p>
+    <div class="acoes-dlg">
+      <button type="submit" class="primary" data-i18n="reauth_submit"></button>
+      <button type="button" id="reauth_cancel" data-i18n="cancel"></button>
+    </div>
+  </form>
+</dialog>
 
 <script type="module" src="./app.js"></script>
 </body>

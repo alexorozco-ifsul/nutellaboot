@@ -68,6 +68,11 @@ São três camadas:
    └────────────────────────────────────────────────────────────────┘
 ```
 
+Sala sem pendrive boota pela rede: o iPXE da sede carrega o mesmo kernel e o
+mesmo initrd e põe o `nutellaboot.conf` dentro deste, em `/nutellaboot.conf`. O
+passo 1 usa esse arquivo e não procura a partição (`docs/boot-flow.md`, *Boot
+pela rede*).
+
 ## O banco-filesystem
 
 Não há banco de dados. O estado é um diretório, `data/`, e cada arquivo tem
@@ -96,13 +101,17 @@ data/
 │   ├── wallpaper.png            arquivo enviado pelo configureitor
 │   ├── wallpaper.json           {md5, size, filename, content_type}
 │   ├── seeders.json             {"<ip>": {"last_seen": epoch}}
+│   ├── machineids.json          {machine_id: mac} — para alertar o clone (identity.duplicate)
 │   ├── roster.json              times/usuários (nome, organização, país, lugar)
 │   ├── roster/logos/<org>.svg   logotipos das instituições (svg ou png)
 │   ├── webhooks.json            destinos de eventos (0600, guarda o segredo)
 │   └── machines/<mac>/
-│       ├── machine.json         mac, first_seen, last_seen, logs_at, logs_bytes
+│       ├── machine.json         mac, first_seen, last_seen, logs_*, boot_id, boots, boot_seen_at, last_boot, editors_reset_at
 │       ├── status.json          última telemetria recebida (sobrescrita, teto 256 kB)
-│       ├── binding.json         vínculo com o roster (user_id, seat)
+│       ├── binding.json         vínculo atual (bound_at, by, source, user_id|name, seat, boot_id?, client_at?, note?)
+│       ├── bindings.log         histórico de vínculos (bound/unbound), JSONL com teto
+│       ├── samples.jsonl        série da telemetria (um ponto por status), teto 2 MiB
+│       ├── samples.meta.json    {cuts, first_t, cut_at} — quando o teto cortou de fato
 │       ├── lockstate.json       {locked, since, by}
 │       ├── queue/<ts>-<cid>.json  comandos pendentes (um arquivo cada)
 │       ├── acks.log             confirmações, JSONL com teto de tamanho
@@ -139,8 +148,28 @@ baixadas de lá; o estado de cada envio fica em `publish/`, que é o que aliment
 o botão de reenviar quando o servidor está fora do ar. Falha de publicação não
 quebra o boot: a camada continua sendo servida pela máquina de gestão.
 
-O MAC é normalizado para minúsculas com hífen (`52-54-00-12-34-56`), que é o
-formato entregue pelo `BOOTIF` na linha de comando do kernel.
+O MAC é normalizado para minúsculas com hífen (`52-54-00-12-34-56`).
+
+### Identidade da máquina
+
+A chave da máquina é o **MAC estável** que o initrd escolhe
+(`client/stuff/10-identidade.sh`) e grava em `/etc/mac-icpc`: a primeira
+placa cabeada interna; sem cabeada, a primeira wifi interna; adaptador USB
+nunca, porque pode não estar lá no próximo boot; `BOOTIF` (a placa por onde
+bootou) só como reserva. O agente e a tela de bloqueio leem o arquivo. Antes
+a chave era o `BOOTIF`, e a mesma máquina que bootava por cabo, wifi e USB
+aparecia como três — e sem `BOOTIF` (boot por wifi) a tela de bloqueio nem
+consultava o estado.
+
+O `/etc/machine-id` é `md5(MAC estável)`, sobrescrito a cada boot: único por
+placa, reproduzível na mão (`printf '%s' 'aa-bb-cc-dd-ee-ff' | md5sum`),
+imune a home clonada e a `cleanhome`. O `boot_id` é o `NBUID` que o servidor
+sorteia a cada stuff. O user-agent do Firefox e do Epiphany leva
+`MLinux/<imagem>/<machine_id>/<boot_id>/<mac>` (o MAC no fim, para quem lê a
+tupla por posição continuar lendo), e a mesma linha fica em
+`/etc/moj/user-agent` para a CLI do juiz. O servidor alerta
+`identity.duplicate` quando duas máquinas da sede reportam o mesmo
+`machine_id`.
 
 ## Invariantes
 
@@ -218,7 +247,7 @@ em outra rota não identifica ninguém.
 ### Logs e alertas: dois canais, dois comportamentos
 
 A telemetria (`status.json`) é um **retrato do agora**: sobrescrita a cada
-~45 s, sem histórico. Isso resolve "como está a sala neste momento" e não
+a cada 40 a 59 s, sem histórico. Isso resolve "como está a sala neste momento" e não
 resolve mais nada — e havia dois casos que precisavam de outra coisa.
 
 **Logs** (`journal.log`) são histórico: a máquina manda o journal do boot na
@@ -240,7 +269,15 @@ registro. Consequências que caem dela:
 - **a máquina não dispensa o próprio alerta** (a chave de máquina não serve na
   rota de dispensa): adulterar o agente não apaga o rastro;
 - a detecção é por regra de `udev`, não por varredura — o ciclo de telemetria
-  é de ~45 s e um pendrive espetado por dez segundos passaria batido.
+  é de ~50 s e um pendrive espetado por dez segundos passaria batido;
+- é **mudança de estado**: a fila que o agente encontra ao subir (o coldplug
+  do boot reemite `add` para tudo que já estava lá, pendrive de boot
+  inclusive) é descartada com registro no log, e um alerta igual ainda aberto
+  na mesma máquina (`kind`, `detail`, `vendor`) não é repetido — o servidor
+  devolve o existente com `repeated: true` e não emite evento. A regra de
+  udev só olha nós com conteúdo sondado (`ID_FS_USAGE`): no nó do disco
+  inteiro a label da partição ainda não estava no banco do udev durante o
+  boot, e o pendrive de boot alarmava a cada ligada.
 
 O `kind` do alerta não é validado contra uma lista fechada: o cliente pode
 ganhar um detector novo sem esperar uma versão do servidor. A lista conhecida
@@ -370,7 +407,8 @@ máquinas atendidas, bytes servidos) na tela.
    tombstone `released` que o heartbeat seguinte entrega. Nos dois casos a
    máquina chama `leave`, mata o `webfsd` e termina o boot.
 4. **Expiração** — `seeders.live()` descarta na leitura quem não renova há
-   mais de `seeder_ttl_sec` (padrão: 180 s). Máquina desligada some sozinha,
+   mais de `seeder_ttl_sec` (padrão: 180 s; `command_ttl_sec`, padrão 600 s,
+   é o irmão para a fila de ordens). Máquina desligada some sozinha,
    e o tombstone de uma máquina que morreu sem se despedir expira igual.
 5. **Saída explícita** — `/seeders/leave` remove na hora (entrada e
    tombstone); não exige credencial porque só sabe remover uma entrada.
@@ -412,6 +450,17 @@ Dois detalhes importantes:
   e ao acordar o disco é lido de novo. É a rede de segurança: mesmo que o sinal
   em memória se perca (processo reiniciado no meio, por exemplo), o pior caso é
   5 segundos, não 25.
+
+**Validade das ordens.** O alvo `"all"` é resolvido no envio para toda
+máquina que já apareceu na sede — inclusive as desligadas naquele momento — e
+cada uma ganha o seu arquivo em `queue/`; o único removedor era o `ack`. Uma
+ordem de desligar mandada no fim do dia ficava esperando, e a máquina que
+ligasse na manhã seguinte desligava de novo. Por isso `pending_commands`
+apaga, na leitura, o que passou de `command_ttl_sec` (`data/server.json`,
+padrão 600 s — a mesma janela que o nb2 aplicava do lado da máquina) contados
+do `not_before`, e deixa o rastro em `acks.log` com `status: "expired"`. O
+bloqueio de tela não depende disso: `lockstate.json` é reentregue em todo
+poll.
 
 Os eventos criados dentro da requisição, e não guardados em dicionário de longa
 duração, são propositais: um `asyncio.Event` fica preso ao *event loop* em que

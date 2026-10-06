@@ -11,7 +11,7 @@ Todos os comandos partem da raiz do repositório (`nutellaboot3/`).
 .venv/bin/python -m pytest
 ```
 
-São 481 testes em cerca de 36 s. O que cada arquivo cobre:
+São 1264 testes em cerca de 3 min. O que cada arquivo cobre:
 
 | Arquivo | O que garante |
 |---|---|
@@ -19,7 +19,7 @@ São 481 testes em cerca de 36 s. O que cada arquivo cobre:
 | `test_auth.py` | as classes de credencial (admin, imagem, serviço, máquina) e seus limites |
 | `test_health.py` | o endpoint de saúde |
 | `test_boot_endpoints.py` | manifest com todos os seeders vivos e o CDN por último, TTL de seeder, geração do stuff, chave de boot, criação e criação em massa de imagens |
-| `test_bootstrap_shell.py` | a lógica shell do initrd: precedência de configuração, geração do `wpa_supplicant.conf`, pin de `/etc/hosts`. Inclui três testes de regressão que **falham se alguém**: usar `read` interativo no caminho de boot, desligar a verificação de certificado, ou redefinir as funções de rede dentro do stuff |
+| `test_bootstrap_shell.py` | a lógica shell do initrd: precedência de configuração, o conf entregue pelo carregador de rede (netboot) e que ele não chega ao `/run` do sistema montado, geração do `wpa_supplicant.conf`, pin de `/etc/hosts`. Inclui três testes de regressão que **falham se alguém**: usar `read` interativo no caminho de boot, desligar a verificação de certificado, ou redefinir as funções de rede dentro do stuff |
 | `test_config.py` | validação do formulário, campos bloqueados, senha guardada só como hash, upload de wallpaper |
 | `test_commands.py` | ciclo de vida do comando (enfileirar, buscar, confirmar), lista de comandos permitidos, bloqueio de tela, teto de tamanho dos logs |
 | `test_longpoll_async.py` | a latência real do long-poll no mesmo event loop: bloqueio chega em menos de 1,5 s, e 50 máquinas simultâneas em menos de 3 s |
@@ -34,12 +34,15 @@ São 481 testes em cerca de 36 s. O que cada arquivo cobre:
 | `test_migrate_names.py` | a migração de nomes: `--dry-run` não mexe em nada, é idempotente e não sobrescreve destino existente |
 | `test_web_js.py` | um *no-undef* mínimo para o JavaScript das telas (não há node nesta máquina): acusa uso de variável sem declaração que não seja global do navegador — a classe do "template is not defined" que só explodia no clique. Pende para o falso negativo de propósito; não substitui um linter de verdade |
 | `test_web_ids.py` | todo id que o JavaScript procura existe no HTML da tela (erro que deixaria a tela em branco, sem mensagem) |
+| `test_web_css.py` | toda classe que uma tela usa (no HTML e em todo o grafo de módulos JS que ela carrega) existe no CSS que ela carrega. Os ganchos só de JavaScript ficam numa lista, cada um com o motivo. Um autoteste confere que uma classe sem estilo é acusada: o painel de camadas do console antigo usava o `div.detail` do laboratório e aparecia sem estilo |
+| `test_console.py` | o console tem três modos, e só três: lista, página de detalhe e diálogo. Nada de `prompt()`/`confirm()`/`alert()`; `<dialog>` só nasce em `web/common/dialogo.js`; nada é enfiado fora da página; `innerHTML` só para limpar; handler assíncrono passa por `acao()`; abas, rotas e módulos batem; aba desconhecida ou alheia volta ao padrão; o código de convite nunca vai para o endereço |
+| `test_camadas_anexar.py` | anexar uma construção ao modelo (posição 0, papel `extra`, sem duplicar, sem tocar no `attach_to`), a quem gerencia o modelo; o `attached` só lista imagens visíveis; o manifest leva o arquivo uma vez só; o catálogo traz as construções prontas visíveis; construção sem arquivo não anexa |
 | `test_tool_routes.py` | toda rota `/api/v1/…` citada em `tools/` existe na API de verdade |
 | `test_boot_ui.py` | o kit de tela do boot: cada glifo da fonte tem 5 linhas, o banner quebra quando não cabe, o passo fecha a linha antes de um aviso, nenhum temporário é compartilhado entre funções (foi o que causou `sleep RAM`) e **nenhuma mensagem de tela tem acento** — o proxy de "sobrou português" |
 | `test_boot_screens.py` | as telas fatais: o diagnóstico de disco escolhe entre Fast Startup, pouco espaço, disco não detectado e sistema de arquivos não suportado; cada tela **cabe em 25 linhas** (senão o banner rola para fora, como aconteceu na primeira verificação em VM) e toda tela diz o que fazer |
 | `test_camada_telemetria.py` | a camada de telemetria nasce com todos os coletores, dono `root:root`, bit de execução onde faz falta e sem segredo; o nome muda quando o conteúdo muda |
 | `test_logs.py` | ingestão de log com teto por requisição (413) e por máquina (mantém a cauda), leitura da cauda, autenticação, e que a telemetria também passou a ter teto |
-| `test_session.py` | a sessão do console: o cookie sozinho entra (é o que o reload passa a fazer), as flags do cookie, expiração, e a revogação de verdade — trocar a chave de administração, revogar o convite ou suspender o sub-admin derruba a sessão na hora; mais o par de CSRF (cookie sem o cabeçalho `X-NB-Console` é recusado, com ele é aceito) e a garantia de que **Bearer continua funcionando** para as ferramentas e o MOJ |
+| `test_session.py` | a sessão do console: o cookie sozinho entra (é o que o reload passa a fazer), as flags do cookie, expiração, e a revogação de verdade — trocar a chave de administração, revogar o convite ou suspender o sub-admin derruba a sessão na hora; mais o par de CSRF (cookie sem o cabeçalho `X-NB-Console` é recusado, com ele é aceito), a garantia de que **Bearer continua funcionando** para as ferramentas e o MOJ, e a renovação deslizante (renova depois de um dia de uso reemitindo o cookie, não reescreve o arquivo a cada requisição, expirada continua expirada, `<img>`/SSE não renovam, identidade revogada não ganha sobrevida) |
 | `test_layer_roles.py` | o papel de cada camada: `role` inválido é recusado, `replace_role` troca a base **mantendo a posição** (por último), e registrar uma base com nome diferente deixa **uma** base e não duas — a regressão que fazia a máquina baixar duas raízes; mais a migração de papéis (dedução, idempotência, respeito ao que já foi marcado à mão) |
 | `test_nova_temporada.py` | o comando de temporada contra um uvicorn de verdade: herda camadas e cadeados, não toca no modelo anterior, preenche um modelo que ficou vazio, não empilha bases ao rodar duas vezes, e **falha alto** com nome de modelo errado ou chave errada (era o que terminava com sucesso sem registrar nada) |
 | `test_alerts.py` | o alerta de dispositivo **não some sozinho**, sobrevive a recarga, só dispensa com credencial de console, a máquina não dispensa o próprio alerta, e a regra de udev ignora o pendrive de boot |
@@ -50,6 +53,11 @@ São 481 testes em cerca de 36 s. O que cada arquivo cobre:
 | `test_requests.py` | a fila de pedidos de quem não tem código: enviar, aprovar emitindo código, recusar |
 | `test_ratelimit.py` | o limite de taxa das rotas públicas, incluindo o respeito ao `X-Forwarded-For` |
 | `test_publish.py` | publicação de arquivos no servidor de arquivos externo, com repetição em caso de falha |
+
+`tests/fixtures/` guarda arquivos tirados da camada base publicada (o script
+do firewall e o `/etc/hosts`), byte a byte: o remendo do firewall se confere
+contra o que a máquina tem, não contra o histórico do pacote. O `README.md` de
+lá diz de onde veio cada um.
 
 Sobre o `test_live_server.py`: ele existe porque o transporte ASGI do `httpx`
 **não** faz streaming — executa a aplicação até o fim antes de devolver a
@@ -150,6 +158,45 @@ esparso se ainda não existir, e sobe o qemu em UEFI com os dois discos. Opçõe
 | `--fresh-disk` | descarta o disco e começa do zero |
 | `--build-only` | só gera o pendrive, não sobe a VM |
 | `--headless` | sem janela gráfica |
+| `--netboot` | sem pendrive: boot pela rede, como numa sede com iPXE (abaixo) |
+
+### Boot pela rede (iPXE)
+
+O `--netboot` troca o pendrive pelo que uma sede com PXE faz: o qemu sobe em
+BIOS, a ROM iPXE da placa de rede pega o DHCP do próprio SLIRP e baixa por TFTP
+o `data/netboot-test/boot.ipxe`, que carrega `vmlinuz`, `initrd.img` e o
+`nutellaboot.conf` como segundo initrd com nome. Na tela deve aparecer
+`configuration read from the network boot loader`, e nada de "PODE RETIRAR O
+PENDRIVE".
+
+Em UEFI o PXE é o do OVMF, que não roda script iPXE — ele baixa o `boot.ipxe`
+como se fosse um executável EFI e o recusa. Para testar esse caminho, encadeie
+o iPXE: sirva o `snponly.efi` oficial (<https://boot.ipxe.org/x86_64-efi/snponly.efi>)
+como arquivo de boot do SLIRP (`bootfile=snponly.efi`) e o script como
+`autoexec.ipxe`, com `dhcp` na primeira linha e URLs absolutas
+(`tftp://10.0.2.2/vmlinuz`). O iPXE busca o `autoexec.ipxe` no mesmo servidor
+TFTP de onde foi carregado. O kernel recebe os initrds pelo LoadFile2
+(`efi: … INITRD=` no dmesg), sem `initrd=` na linha de comando.
+
+### Testar uma mudança no bootstrap sem reconstruir o initrd
+
+O `nb3-build-initrd` precisa de root. Para testar uma mudança em
+`client/initramfs-tools/scripts/nutellaboot` antes disso, ponha um cpio com o
+arquivo novo **depois** do initrd atual: o kernel desempacota os arquivos em
+ordem, e o que vem depois sobrescreve.
+
+```bash
+mkdir -p /tmp/ov/scripts && cp client/initramfs-tools/scripts/nutellaboot /tmp/ov/scripts/
+(cd /tmp/ov && find . -mindepth 1 | cpio -o -H newc -R 0:0) > /tmp/overlay.cpio
+```
+
+No iPXE, é uma linha `initrd overlay.cpio` depois do `initrd initrd.img`. Para
+o pendrive, concatene (`cat client/build/initrd.img /tmp/overlay.cpio`, com o
+primeiro alinhado em 4 bytes) e passe o resultado ao `nb3-genusb --initrd`. Com
+um `etc/nutellaboot-build` diferente no mesmo cpio, a máquina se vê
+desatualizada — é como se testa o `25-usbupdate.sh` de ponta a ponta. Um
+console serial (`console=tty0 console=ttyS0,115200` na linha do kernel e
+`-serial file:boot.log` no qemu) deixa o boot inteiro num arquivo de texto.
 
 ### O detalhe do `10.0.2.2`
 

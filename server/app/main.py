@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -5,12 +6,15 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 
+from . import errors, schemas
+
 from .routers import (
     boot,
     config,
     health,
     images,
     invites,
+    keys,
     labs,
     layers,
     machines,
@@ -64,8 +68,50 @@ class LegacyImagePathMiddleware:
         await self.app(scope, receive, send)
 
 
+class SessionCookieMiddleware:
+    """Reemite o cookie de sessão quando ela foi renovada nesta requisição.
+
+    `auth.principal` marca `request.state.reemitir_cookie` (que vive em
+    scope["state"]); aqui o Set-Cookie entra na resposta. ASGI puro, como o
+    de cima: um BaseHTTPMiddleware envolveria o long-poll e o SSE.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def enviar(msg):
+            if msg["type"] == "http.response.start":
+                sid = (scope.get("state") or {}).get("reemitir_cookie")
+                if sid:
+                    from starlette.responses import Response
+
+                    from .services import sessions
+
+                    r = Response()
+                    sessions.set_cookie(r, sid)
+                    msg = {**msg, "headers": list(msg.get("headers", [])) + r.raw_headers}
+            await send(msg)
+
+        await self.app(scope, receive, enviar)
+
+
 @asynccontextmanager
 async def _vida(app: FastAPI):
+    # campo novo do esquema padrão vai para o schema.json de todo modelo aqui,
+    # no restart do deploy: fora do gate abaixo porque não é tarefa de fundo, e
+    # é idempotente (modelo completo não é regravado). Aviso e não info: a
+    # unidade roda com --log-level warning, e a doc manda procurar esta linha.
+    from .services import store
+
+    for modelo, campos in store.completar_esquemas().items():
+        logging.getLogger("uvicorn.error").warning(
+            "formulario do modelo %s atualizado pelo esquema padrao: %s", modelo, ", ".join(campos)
+        )
+
     # o gravador da série da frota vive no worker único (invariante 2): um
     # ponto por minuto para o histórico do dashboard. No lifespan e não no
     # import: os testes criam apps aos montes e não querem tarefa de fundo.
@@ -73,6 +119,14 @@ async def _vida(app: FastAPI):
         from .services import labs_series
 
         labs_series.iniciar()
+        # o vigia de quem sumiu (machine.offline) e dos comandos que venceram
+        from .services import presence
+
+        presence.iniciar()
+        # o "último uso" das chaves vive na memória e vai ao disco 1x por minuto
+        from .services import keyusage
+
+        keyusage.iniciar()
     yield
 
 
@@ -86,6 +140,18 @@ def create_app() -> FastAPI:
         openapi_url="/api/v1/openapi.json",
         generate_unique_id_function=_operation_id,
     )
+    errors.instalar(app)
+
+    gerar_openapi = app.openapi
+
+    def openapi_com_formatos() -> dict:
+        # os formatos das respostas entram no DOCUMENTO, não nas rotas: ver
+        # schemas.py para o porquê de não serem response_model
+        if app.openapi_schema is None:
+            schemas.aplicar(gerar_openapi())
+        return app.openapi_schema
+
+    app.openapi = openapi_com_formatos
     app.include_router(health.router)
     app.include_router(boot.router)
     app.include_router(models.router)
@@ -94,6 +160,7 @@ def create_app() -> FastAPI:
     app.include_router(machines.router)
     app.include_router(roster.router)
     app.include_router(webhooks.router)
+    app.include_router(keys.router)
     app.include_router(labs.router)
     app.include_router(layers.router)
     app.include_router(invites.router)
@@ -126,6 +193,7 @@ def create_app() -> FastAPI:
         app.mount("/", StaticFiles(directory=web, html=True), name="web")
 
     app.add_middleware(LegacyImagePathMiddleware)
+    app.add_middleware(SessionCookieMiddleware)
     return app
 
 

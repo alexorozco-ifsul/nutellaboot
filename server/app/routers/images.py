@@ -5,15 +5,13 @@ from __future__ import annotations
 
 import csv
 import io
-import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
 from .. import auth
 from ..models import BulkRequest, SiteImageCreate, SiteImagePatch
-from ..services import ownership, seeders, store, usb, webhook_push
-from ..services.notify import notify
+from ..services import audit, eventos, fleet_views, invites, owners, ownership, presence, seeders, store, usb
 
 router = APIRouter(prefix="/api/v1")
 
@@ -25,14 +23,41 @@ async def create_image(body: SiteImageCreate, p=Depends(auth.require_console)) -
         raise HTTPException(403, erro)
     if not ownership.can_use_model(p, body.model):
         raise HTTPException(404, "modelo não existe")
+    extra = {}
+    unlocked = body.unlocked
+    wallpaper_locked = body.wallpaper_locked
+    if p.kind != "admin":
+        # O convite decide, como na auto-criação (`routers/public.py`). O PATCH
+        # já proibia o sub-admin de mudar perfil e trava; a criação deixava
+        # escolher, e uma imagem Livre ignora todos os cadeados do modelo.
+        # Oficial (mais restrito que o convite) continua sendo escolha dele.
+        inv = invites.get(owners.code_of(p.owner)) or {}
+        if unlocked and not bool(inv.get("unlocked", True)):
+            raise HTTPException(403, "o convite só permite imagens Oficiais")
+        trava = bool(inv.get("wallpaper_locked", False))
+        if "wallpaper_locked" in body.model_fields_set and wallpaper_locked != trava:
+            raise HTTPException(403, "a trava do papel de parede vem do convite")
+        wallpaper_locked = trava
+        # a cota de construções por imagem também: sem ela, a imagem criada
+        # pelo console ficava com cota 0 e a do /criar/ com a do convite
+        extra["build_quota"] = int(inv.get("build_quota", invites.DEFAULT_BUILD_QUOTA))
+    if wallpaper_locked:
+        extra["wallpaper_locked"] = True
+    if body.dashboard_hidden:
+        if p.kind != "admin":
+            # o PATCH já tinha este portão; a criação não
+            raise HTTPException(403, "só a administração oculta uma imagem do dashboard")
+        extra["dashboard_hidden"] = True
+    if body.country:
+        extra["country"] = body.country
     try:
         criada = store.create_site_image(
             body.id,
             body.fullname,
             body.model,
-            unlocked=body.unlocked,
+            unlocked=unlocked,
             owner=p.owner,
-            extra={"wallpaper_locked": bool(body.wallpaper_locked)} if body.wallpaper_locked else None,
+            extra=extra or None,
         )
     except store.ImageError as e:
         raise HTTPException(400, str(e))
@@ -116,13 +141,32 @@ async def bulk_create(
 
 
 @router.get("/site-images")
-async def list_images(prefix: str = "", p=Depends(auth.require_console)) -> dict:
-    return {"images": ownership.visible_site_images(p, prefix)}
+def list_images(prefix: str = "", p=Depends(auth.require_console_or_service)) -> dict:
+    # `def`: para a chave de serviço conta as máquinas de cada sede (disco)
+    if p.kind == "service":
+        return {"images": ownership.imagens_para_servico(p, prefix)}
+    # com o dono de cada uma, do jeito que pode ser mostrado (rótulo, e não o
+    # código do convite): a lista do console não dizia de quem era a imagem
+    return {
+        "images": [
+            {**i, **ownership.owner_publico(str(i.get("owner") or "admin"))}
+            for i in ownership.visible_site_images(p, prefix)
+        ]
+    }
 
 
 @router.get("/site-images/{image}")
-async def get_site_image(image: str, p=Depends(auth.require_image_access())) -> dict:
-    return store.get_site_image(image) or {}
+async def get_site_image(
+    image: str, p=Depends(auth.require_image_access(service_scope=auth.QUALQUER))
+) -> dict:
+    # Qualquer chave de serviço cujo glob cubra a imagem, sem escopo específico:
+    # ela já conhece o id (whoami e a lista o dão) e aqui não há telemetria.
+    # Exigir `machines:read` devolveria o 403 a toda chave só de roster.
+    if p.kind == "service":
+        return ownership.imagem_para_servico(store.get_site_image(image) or {}, completa=True)
+    # nunca o image.json cru: o `owner` de uma sede criada por convite é o
+    # código do convite, e esta rota atende o token da sede (o hotconfig a lê)
+    return ownership.site_image_para(p, store.get_site_image(image) or {})
 
 
 @router.patch("/site-images/{image}")
@@ -144,6 +188,10 @@ async def patch_image(image: str, body: SiteImagePatch, p=Depends(auth.require_c
         # cota que o próprio dono aumenta não é cota
         raise HTTPException(403, "só a administração muda a cota de builds")
 
+    if campos.get("dashboard_hidden") is not None and p.kind != "admin":
+        # tirar a própria sede do placar da organização não é decisão do dono
+        raise HTTPException(403, "só a administração oculta uma imagem do dashboard")
+
     if campos.get("wallpaper_locked") is not None and p.kind != "admin":
         # o mesmo portão do `unlocked`: a trava do wallpaper é decisão da
         # organização (o convite a fixa na criação), e o dono podia desligá-la
@@ -160,6 +208,9 @@ async def patch_image(image: str, body: SiteImagePatch, p=Depends(auth.require_c
 async def delete_image(image: str, p=Depends(auth.require_console)) -> None:
     _minha(p, image)
     store.delete_site_image(image)
+    # senão o vigia anunciaria `machine.offline` de uma sede que não existe mais
+    presence.esquecer_imagem(image)
+    fleet_views.purge_image(image)
 
 
 @router.post("/site-images/{image}/token/rotate")
@@ -192,6 +243,35 @@ async def rotate_boot_key(image: str, p=Depends(auth.require_console)) -> dict:
     return {"boot_key": store.rotate_boot_key(image)}
 
 
+@router.post("/site-images/{image}/machine-key/rotate")
+def rotate_machine_key(image: str, body: dict, request: Request, p=Depends(auth.require_console)) -> dict:
+    """Troca a chave de máquina da sede (era a única credencial sem rotação).
+
+    `grace_hours` (0 a 72, padrão 12): por quanto tempo a chave ANTIGA ainda
+    vale. A máquina só recebe a chave no boot; sem carência, quem está ligada
+    para de reportar e de receber ordem na hora, e uma máquina travada não
+    receberia o destravar. Por isso `grace_hours: 0` (chave vazada) é recusado
+    enquanto houver máquina travada, a não ser com `force`."""
+    _minha(p, image)
+    horas = body.get("grace_hours", 12)
+    if not isinstance(horas, (int, float)) or isinstance(horas, bool) or not 0 <= horas <= 72:
+        raise HTTPException(400, "grace_hours vai de 0 a 72")
+    from ..services import machines as m
+
+    maquinas = m.list_machines(image)
+    travadas = sum(1 for x in maquinas if (x.get("lock") or {}).get("locked"))
+    ligadas = sum(1 for x in maquinas if x.get("online"))
+    if horas == 0 and travadas and not body.get("force"):
+        raise HTTPException(
+            409,
+            f"{travadas} máquina(s) travada(s) ficariam sem receber o destravar: "
+            "destrave antes, use carência, ou repita com force",
+        )
+    r = store.rotate_machine_key(image, float(horas))
+    audit.registrar(p, request, "machine_key.rotated", image, {"grace_hours": horas, "online": ligadas})
+    return {**r, "online": ligadas, "locked": travadas}
+
+
 @router.get("/site-images/{image}/seeders")
 async def list_seeders(image: str, p=Depends(auth.require_image_access())) -> dict:
     return {"seeders": seeders.detail(image)}
@@ -202,8 +282,7 @@ async def remove_seeder(image: str, ip: str, p=Depends(auth.require_image_access
     """Libera o seeder: marca o tombstone e a máquina, ao ver `released=t` no
     heartbeat, sai do modo seed e termina o boot."""
     seeders.release(image, ip)
-    notify.publish(image, {"event": "seeder.released", "data": {"ip": ip}, "at": time.time()})
-    webhook_push.emit(image, "seeder.released", {"ip": ip})
+    eventos.publicar(image, "seeder.released", {"ip": ip})
 
 
 def _minha(p, image: str) -> None:
