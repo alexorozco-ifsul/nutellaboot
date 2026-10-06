@@ -54,6 +54,11 @@ São 1264 testes em cerca de 3 min. O que cada arquivo cobre:
 | `test_ratelimit.py` | o limite de taxa das rotas públicas, incluindo o respeito ao `X-Forwarded-For` |
 | `test_publish.py` | publicação de arquivos no servidor de arquivos externo, com repetição em caso de falha |
 
+`tests/fixtures/` guarda arquivos tirados da camada base publicada (o script
+do firewall e o `/etc/hosts`), byte a byte: o remendo do firewall se confere
+contra o que a máquina tem, não contra o histórico do pacote. O `README.md` de
+lá diz de onde veio cada um.
+
 Sobre o `test_live_server.py`: ele existe porque o transporte ASGI do `httpx`
 **não** faz streaming — executa a aplicação até o fim antes de devolver a
 resposta, o que deixaria um fluxo SSE (que não termina) pendurado para sempre.

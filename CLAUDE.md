@@ -390,6 +390,15 @@ O ambiente de teste tem um nginx externo que faz proxy de
   e a rota da sede devolve 400 `no_target` para `target` diferente de `"all"`,
   `targets`, `macs`, `mac` ou `machines`. Há teste do efeito
   (`tests/test_commands.py`).
+- **Remendo de pacote da base em tempo de boot confere o texto da camada
+  PUBLICADA, não o histórico do git.** O `30-firewall.sh` troca o script do
+  `maratona-firewall` quando reconhece o filtro defeituoso do `/etc/hosts`. O
+  gatilho procurava o `egrep -v` do commit que o pacote tinha no git, e a base
+  publicada vinha com a versão seguinte, escrita com `grep --invert-match`: a
+  troca nunca disparou numa máquina, e o teste passava contra um script que
+  não existia na base. O texto real está em `tests/fixtures/` (tirado com
+  `unsquashfs -cat` da camada), o texto embutido é idêntico ao arquivo do
+  pacote, e há teste de que ele não dispara o próprio gatilho.
 - **Texto de fora não entra cru em `innerHTML`.** O pedido de imagem do
   formulário PÚBLICO (`wanted_name`, `contact`, `note`) era interpolado na
   tela do admin: um anônimo rodava script na sessão que gere as chaves. Nome
