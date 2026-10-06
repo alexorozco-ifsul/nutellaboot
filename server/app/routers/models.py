@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from .. import auth, fsdb
 from ..models import ModelLayers
 from ..services import layer_roles, layerbuilds, ownership, store
+from ..services.config import esquema_publico
 from ..services import wallpaper as wp
 from ..settings import settings
 
@@ -293,7 +294,7 @@ async def layers_catalog(p=Depends(auth.require_console)) -> dict:
 async def get_model_schema(name: str, p=Depends(auth.require_console)) -> dict:
     if not ownership.can_use_model(p, name):
         raise HTTPException(404, "modelo não existe")
-    schema = store.get_schema(name)
+    schema = esquema_publico(store.get_schema(name))
     return {
         "name": name,
         "fields": [
@@ -308,6 +309,7 @@ async def get_model_schema(name: str, p=Depends(auth.require_console)) -> dict:
                 # idioma ficava impossível pela tela
                 "options": f.get("options"),
                 "locked": bool(f.get("locked")),
+                **({"has_default": f["has_default"]} if "has_default" in f else {}),
             }
             for f in schema.get("fields", [])
         ],

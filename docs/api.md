@@ -266,7 +266,7 @@ telemetria, wifi, pacotes) e o formulário que cada sede preenche
 | PUT | `/api/v1/models/{n}/layers/order` | C | `{files:[…]}` | `{layers:[…]}` |
 | PUT | `/api/v1/models/{n}/layers` | C | `{layers:[…]}` | substitui a lista inteira (prefira o `POST`: uma leitura desatualizada aqui apaga o que outro acabou de acrescentar) |
 | GET | `/api/v1/layers/catalog` | C | — | camadas já em uso, com `used_by`, e as construções prontas visíveis a quem pergunta (`build:{id, name, model, finished_at}`, `available`) |
-| GET | `/api/v1/models/{n}/schema` | C | — | campos com `default`, `label`, `help` e `locked` |
+| GET | `/api/v1/models/{n}/schema` | C | — | campos com `default`, `label`, `help`, `options` e `locked`; campo de senha traz `has_default` |
 | PUT | `/api/v1/models/{n}/schema/locks` | C | `{locks:{CAMPO:true|false}}` | schema atualizado |
 | PATCH | `/api/v1/models/{n}/schema/fields/{key}` | C | `{default?, locked?, label?, help?}` | schema atualizado |
 
@@ -289,6 +289,13 @@ Notas que economizam depuração:
 - `PATCH …/schema/fields/{key}` ajusta um campo existente. Não cria campos:
   variável nova só teria efeito se algum módulo do `stuff` a lesse, o que é
   mudança de cliente. `label` e `help` exigem os três idiomas.
+- O padrão de um campo de senha (`ROOT_PASSWORD`, `LOCK_FALLBACK_PASSWORD`) é
+  guardado como hash e **não sai pela API**: nem no `schema` de
+  `GET /models/{n}` e das escritas que devolvem o modelo, nem no de
+  `GET /config`, nem no `GET …/schema`. No lugar vem `has_default: true|false`.
+  Só o `stuff` da sede recebe o hash (`NB_ROOT_PW_HASH`). O hash de root é um
+  `$6$` da senha que a organização escolheu: com ele, o token de uma sede
+  quebrava a senha offline.
 - Modelo sem camada nenhuma gera uma site-image que **não boota**; a criação
   devolve `warning` avisando disso.
 - Só a administração marca um modelo como `public`. Modelo público é visível

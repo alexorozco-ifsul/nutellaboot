@@ -11,7 +11,7 @@ que o token alcança.
 import pytest
 
 from server.app import fsdb
-from server.app.services import owners, store
+from server.app.services import owners, ratelimit, store
 
 MD5 = "0" * 32
 
@@ -23,6 +23,8 @@ def ha(admin_key):
 
 @pytest.fixture
 def lab(data_root, client, ha):
+    # o pedido público tem limite por IP, e todo teste daqui cria uma sede
+    ratelimit.reset()
     fsdb.write_json(data_root / "server.json", {"reserved_prefix_regex": "^[0-9]"})
     client.post("/api/v1/models", json={"name": "oficial", "public": True}, headers=ha)
     client.post("/api/v1/models/oficial/layers", json={"file": "b.squashfs", "md5": MD5}, headers=ha)
@@ -105,3 +107,83 @@ def test_convite_revogado_nao_cria_imagem(client, lab, ha):
     )
     assert r.status_code in (400, 403), r.text
     assert not store.site_image_exists("outrolab")
+
+
+def test_o_hash_da_senha_de_root_do_modelo_nao_sai_pela_api(client, lab, ha):
+    """O padrão do ROOT_PASSWORD é guardado como `default_hash` (`$6$…`) no
+    esquema do modelo, e o configureitor recebia o esquema cru: o token da sede
+    levava o hash da senha de root da organização, quebrável offline. Mesmo
+    funil de antes, mesma conferência pelo valor."""
+    r = client.patch(
+        "/api/v1/models/oficial/schema/fields/ROOT_PASSWORD",
+        json={"default": "da-organizacao", "locked": True},
+        headers=ha,
+    )
+    assert r.status_code == 200, r.text
+    campo = next(f for f in store.get_schema("oficial")["fields"] if f["key"] == "ROOT_PASSWORD")
+    segredo = campo["default_hash"]
+    assert segredo.startswith("$6$")
+
+    ht = {"Authorization": f"Bearer {lab['token']}"}
+    hs = {"Authorization": f"Bearer {lab['code']}"}
+    respostas = [client.get(rota, headers=ht) for rota in _rotas_get_da_imagem(client)]
+    respostas += [
+        client.get("/api/v1/models/oficial", headers=hs),
+        client.get("/api/v1/models/oficial/schema", headers=hs),
+        client.get("/api/v1/models/oficial", headers=ha),
+        # o derivado copia o formulário, e com ele o hash
+        client.post("/api/v1/models/oficial/duplicate", json={"name": "copia"}, headers=hs),
+        client.get("/api/v1/models/copia", headers=hs),
+    ]
+    for r in respostas[-5:]:
+        assert r.status_code < 400, (r.request.url, r.text)
+    for r in respostas:
+        assert segredo not in r.text and "default_hash" not in r.text, f"{r.request.url} entregou o hash de root"
+
+    # quem olha ainda sabe que há um padrão definido
+    config = client.get("/api/v1/site-images/meulab/config", headers=ht).json()
+    root = next(f for f in config["schema"]["fields"] if f["key"] == "ROOT_PASSWORD")
+    assert root["has_default"] is True
+    # e o stuff, que é quem precisa dele, continua recebendo
+    from server.app.services import stuffgen
+
+    assert f"NB_ROOT_PW_HASH='{segredo}'" in stuffgen.render("meulab")
+
+
+def test_nenhuma_rota_de_modelo_entrega_hash_de_senha(client, lab, ha):
+    """O filtro mora no funil (`store.get_model`), e não rota a rota: uma rota
+    nova que devolva o modelo já nasce sem o hash. Esta varredura pega, pelo
+    VALOR, toda rota de modelo do OpenAPI e as escritas que devolvem o modelo,
+    para a administração e para o sub-admin."""
+    for campo, senha in (("ROOT_PASSWORD", "da-organizacao"), ("LOCK_FALLBACK_PASSWORD", "destrava")):
+        r = client.patch(
+            f"/api/v1/models/oficial/schema/fields/{campo}", json={"default": senha}, headers=ha
+        )
+        assert r.status_code == 200, r.text
+    segredos = [
+        f["default_hash"] for f in store.get_schema("oficial")["fields"] if f.get("default_hash")
+    ]
+    assert len(segredos) == 2
+
+    hs = {"Authorization": f"Bearer {lab['code']}"}
+    rotas = [
+        caminho.replace("{name}", "oficial")
+        for caminho, metodos in client.app.openapi()["paths"].items()
+        if "get" in metodos
+        and caminho.startswith("/api/v1/models")
+        and "{" not in caminho.replace("{name}", "")
+    ]
+    assert "/api/v1/models/oficial" in rotas and "/api/v1/models/oficial/schema" in rotas
+    respostas = [client.get(rota, headers=h) for rota in rotas for h in (ha, hs)]
+    respostas += [
+        client.patch("/api/v1/models/oficial", json={"description": "prova"}, headers=ha),
+        client.post("/api/v1/models", json={"name": "derivado", "from": "oficial"}, headers=ha),
+        client.post("/api/v1/models/oficial/duplicate", json={"name": "copia2"}, headers=hs),
+        client.put("/api/v1/models/oficial/schema/locks", json={"locks": {"MINRAM": True}}, headers=ha),
+    ]
+    for r in respostas[-4:]:
+        assert r.status_code < 400, (r.request.method, r.request.url, r.text)
+    for r in respostas:
+        for segredo in segredos:
+            assert segredo not in r.text, f"{r.request.method} {r.request.url} entregou um hash de senha"
+        assert "default_hash" not in r.text, r.request.url
