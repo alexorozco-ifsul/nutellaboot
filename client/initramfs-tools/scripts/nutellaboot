@@ -708,20 +708,30 @@ nb_net_reset() {
 # Com wifi.conf preenchido isso desviava a sala inteira para o rádio, de onde
 # os seeders da sala são inalcançáveis e o aria2 morre em timeout. Latente
 # enquanto o wifi.conf está vazio, porque o desvio é guardado por [ -s ].
-# Visto no lab 219 em 16/09/2026.
 #
 # Quinze segundos é barato: o atalho do wifi existe para evitar os 5 MINUTOS
 # de DHCP cabeado sem cabo, e continua evitando. Cinco não bastava em campo.
+#
+# Sem cabo, deixa em NB_WIRED_WHY o que as placas responderam, para o aviso de
+# quem chama dizer por que o rádio veio primeiro.
 nb_wired_carrier() {
     # 1ª passada: sobe TODAS as cabeadas, para negociarem em paralelo
+    _nbk_n=0
     for _nbk_d in "$NB_SYS_NET"/*; do
         _nbk_i=${_nbk_d##*/}
         [ "$_nbk_i" = lo ] && continue
+        [ -e "$_nbk_d" ] || continue
         if [ -e "$_nbk_d/wireless" ] || [ -e "$_nbk_d/phy80211" ]; then
             continue
         fi
         ip link set "$_nbk_i" up 2> /dev/null
+        _nbk_n=$((_nbk_n + 1))
     done
+    # notebook só com rádio: não há cabo a esperar
+    if [ "$_nbk_n" -eq 0 ]; then
+        NB_WIRED_WHY="no wired interface"
+        return 1
+    fi
 
     # 2ª passada: espera o carrier aparecer em alguma delas. A autonegociação
     # acontece UMA vez: só a primeira chamada do boot espera. Nas rodadas
@@ -729,13 +739,17 @@ nb_wired_carrier() {
     # esperar de novo só atrasaria o wifi (15 s por rodada, 10 rodadas). Um
     # cabo ligado depois negocia sozinho enquanto o rádio é tentado.
     _nbk_max=${NB_CARRIER_WAIT:-15}
-    [ -n "${nb_carrier_waited:-}" ] && _nbk_max=0
-    nb_carrier_waited=1
+    # valor torto (da cmdline ou dos defaults) não pode virar laço sem fim:
+    # `[ 0 -ge abc ]` é falso para sempre
+    case $_nbk_max in '' | *[!0-9]*) _nbk_max=15 ;; esac
+    [ -n "${_nbk_esperou:-}" ] && _nbk_max=0
+    _nbk_esperou=1
     _nbk_t=0
     while :; do
         for _nbk_d in "$NB_SYS_NET"/*; do
             _nbk_i=${_nbk_d##*/}
             [ "$_nbk_i" = lo ] && continue
+            [ -e "$_nbk_d" ] || continue
             if [ -e "$_nbk_d/wireless" ] || [ -e "$_nbk_d/phy80211" ]; then
                 continue
             fi
@@ -749,18 +763,19 @@ nb_wired_carrier() {
         sleep 1
         _nbk_t=$((_nbk_t + 1))
     done
-    nb_log "no wired carrier after ${_nbk_t}s ($(nb_wired_report))"
+    NB_WIRED_WHY="after ${_nbk_t}s:$(nb_wired_report)"
     return 1
 }
 
-# Uma linha dizendo o que as cabeadas responderam. O bug do carrier passou
-# despercebido porque NADA no boot dizia qual caminho foi escolhido nem por
-# que. Sem isto, o sintoma na sala e um download que nao anda.
+# O que cada cabeada respondeu. O defeito do carrier passou despercebido
+# porque NADA no boot dizia qual caminho foi escolhido nem por quê. Só vale
+# depois do nb_wired_carrier: interface que não subiu não informa carrier.
 nb_wired_report() {
     _nbr_o=""
     for _nbr_d in "$NB_SYS_NET"/*; do
         _nbr_i=${_nbr_d##*/}
         [ "$_nbr_i" = lo ] && continue
+        [ -e "$_nbr_d" ] || continue
         if [ -e "$_nbr_d/wireless" ] || [ -e "$_nbr_d/phy80211" ]; then
             continue
         fi
@@ -778,9 +793,10 @@ configure_localnetwork() {
         # tentado — cinco minutos por rodada, medidos no console de uma sala.
         # Com wifi.conf preenchido e nenhum carrier, o rádio vem primeiro.
         if [ -s "$NB_RUN/wifi.conf" ] && ! nb_wired_carrier; then
-            nb_warn "no cable detected; trying wifi first"
+            nb_warn "no cable detected ($NB_WIRED_WHY); trying wifi first"
         else
-            nb_log "using the wired path ($(nb_wired_report))"
+            # com wifi.conf, o carrier foi lido: diz por que o cabo venceu
+            [ -s "$NB_RUN/wifi.conf" ] && nb_log "using the wired path:$(nb_wired_report)"
             log_begin_msg "Configuring the network (attempt $_nbn_try)"
             nb_net_reset
             configure_networking

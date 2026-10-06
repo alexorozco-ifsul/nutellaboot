@@ -153,6 +153,9 @@ def sh(tmp_path):
             "FAKE_SEM_CCM": "",
             "NB_CMDLINE": str(tmp_path / "cmdline"),
             "NB_WIFI_TIMEOUT": "2",
+            # a espera da autonegociação é real (sleep): os testes que a querem
+            # pedem um valor; os outros não pagam 15 s cada
+            "NB_CARRIER_WAIT": "0",
             "NB_NET_TRIES": "1",
             "NB_FATAL_WAIT": "0",
             "NB_SCREEN_WAIT": "0",
@@ -434,7 +437,7 @@ def test_com_cabo_o_caminho_cabeado_continua_primeiro(sh):
 def test_carrier_que_chega_depois_da_autonegociacao_e_cabo(sh):
     """A autonegociação gigabit leva de 1 a 3 s: ler o carrier no mesmo instante
     em que o link sobe dava 0 numa máquina com cabo perfeito, e com wifi.conf
-    preenchido a sala inteira ia para o rádio (lab 219, 16/09/2026)."""
+    preenchido a sala inteira ia para o rádio."""
     out = sh(
         '( sleep 1; echo 1 > "$NB_SYS_NET/eth0/carrier" ) & '
         "if nb_wired_carrier; then echo CABO; else echo SEM-CABO; fi; wait",
@@ -455,6 +458,47 @@ def test_so_a_primeira_rodada_espera_a_autonegociacao(sh):
     )
     assert "FIM" in out
     assert time.monotonic() - inicio < 5, "esperou de novo depois da primeira rodada"
+
+
+def test_sem_placa_cabeada_nao_espera(sh):
+    """Notebook só com rádio: não há autonegociação a esperar, e o rádio vem
+    na hora, sem os 15 s."""
+    import shutil
+    import time
+
+    shutil.rmtree(sh.sysnet / "eth0")
+    inicio = time.monotonic()
+    out = sh("if nb_wired_carrier; then echo CABO; else echo SEM-CABO; fi; echo $NB_WIRED_WHY", NB_CARRIER_WAIT="5")
+    assert "SEM-CABO" in out and "no wired interface" in out
+    assert time.monotonic() - inicio < 3, "esperou carrier sem ter placa cabeada"
+
+
+def test_espera_torta_nao_trava_o_boot(sh):
+    """`NB_CARRIER_WAIT` vem da cmdline ou dos defaults. Um valor que não é
+    número fazia `[ 0 -ge abc ]` ser falso para sempre: laço sem fim no boot."""
+    # sem cabo, com o sleep instantâneo: o padrão de 15 voltas e acabou
+    out = sh(
+        'sleep() { :; }; if nb_wired_carrier; then echo CABO; else echo SEM-CABO; fi; echo "[$NB_WIRED_WHY]"',
+        NB_CARRIER_WAIT="abc",
+    )
+    assert "SEM-CABO" in out and "[after 15s: eth0=0]" in out, out
+
+
+def test_o_aviso_diz_por_que_o_radio_veio_primeiro(sh):
+    sh.wifi(f"Rede{TAB}senha-boa{TAB}\n")
+    out = sh("configure_localnetwork", FAKE_WPA_STATE="COMPLETED")
+    assert "no cable detected (after 0s: eth0=0)" in out, out
+
+
+def test_sem_wifi_conf_o_boot_nao_relata_carrier(sh):
+    """Sem wifi.conf ninguém sobe o link antes do DHCP, e a interface parada
+    não informa carrier: o relatório diria "unreadable" em toda sede cabeada."""
+    (sh.sysnet / "eth0" / "carrier").write_text("1\n")
+    out = sh('touch "$FAKE_ONLINE"; configure_localnetwork', FAKE_DHCP_OK="eth0")
+    assert "using the wired path" not in out
+    sh.wifi(f"Rede{TAB}senha-boa{TAB}\n")
+    out = sh('touch "$FAKE_ONLINE"; configure_localnetwork', FAKE_DHCP_OK="eth0")
+    assert "using the wired path: eth0=1" in out, out
 
 
 def test_placa_que_nao_reporta_carrier_fica_no_caminho_cabeado(sh):

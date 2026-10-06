@@ -317,6 +317,14 @@ console. Se nenhuma interface cabeada reporta carrier e o `wifi.conf` tem
 redes, o wifi é tentado antes. Placa que não reporta carrier continua no
 caminho cabeado — só quem responde `0` explicitamente é considerada sem link.
 
+O carrier não se lê no instante em que o link sobe: a autonegociação gigabit
+leva de 1 a 3 s, e a placa responde `0` nesse meio-tempo, com cabo perfeito.
+Por isso, só com `wifi.conf` preenchido, a primeira rodada sobe todas as
+cabeadas e espera até `NB_CARRIER_WAIT` segundos (15) por um carrier; as
+rodadas seguintes leem na hora. Máquina sem placa cabeada não espera. O boot
+diz o que cada placa respondeu: `using the wired path: eth0=1`, ou
+`no cable detected (after 15s: eth0=0); trying wifi first`.
+
 ### O arquivo é limpo uma vez, na entrada
 
 O `wifi.conf` é digitado à mão pela sede, no computador que ela tiver. O initrd
