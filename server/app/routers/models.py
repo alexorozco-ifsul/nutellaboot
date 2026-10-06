@@ -57,7 +57,6 @@ async def create_model(body: dict, p=Depends(auth.require_console)) -> dict:
     except store.ImageError as e:
         raise HTTPException(400, str(e))
 
-    modelo["schema"] = esquema_publico(modelo.get("schema", {}))
     if not modelo.get("layers"):
         modelo["warning"] = "modelo sem camadas: uma site-image derivada dele não vai bootar"
     return modelo
@@ -82,7 +81,6 @@ async def get_model(name: str, p=Depends(auth.require_console)) -> dict:
     if not ownership.can_use_model(p, name):
         raise HTTPException(404, "modelo não existe")
     tpl = dict(store.get_model(name) or {})
-    tpl["schema"] = esquema_publico(tpl.get("schema", {}))
     dono = store.model_owner(name)
     if not ownership.pode_ver_dono(p, dono):
         tpl.pop("owner", None)
@@ -131,8 +129,7 @@ async def patch_model(name: str, body: dict, p=Depends(auth.require_console)) ->
         description=body.get("description"),
         wallpaper_locked=body.get("wallpaper_locked"),
     )
-    tpl = store.get_model(name) or {}
-    return {**tpl, "schema": esquema_publico(tpl.get("schema", {}))}
+    return store.get_model(name) or {}
 
 
 @router.delete("/models/{name}", status_code=204)

@@ -491,6 +491,13 @@ O ambiente de teste tem um nginx externo que faz proxy de
   arquivo vence", afrouxar a regra do allowlist para aceitar o `_` do nome que
   o MOJ gera não chegou a nenhum modelo, porque o `completar_esquemas` já tinha
   gravado a regra antiga em todos.
+- **O padrão de senha do formulário é hash, e hash não sai pela API.** O
+  `default_hash` do `ROOT_PASSWORD` é o `$6$` da senha de root da organização,
+  e o `GET /config` o entregava ao token da sede, que o quebrava offline. O
+  filtro (`config.esquema_publico`) mora no funil `store.get_model` e no
+  `/config`; quem precisa do hash (o stuff, a validação) lê o formulário por
+  `store.get_schema`. Rota nova que devolva o formulário passa pelo funil.
+  `tests/test_owner_leak.py` varre as rotas de modelo do OpenAPI pelo valor.
 - **`--check` que só confere `which` mente.** O worker de camadas dizia
   "pré-requisitos ok" numa máquina sem `uidmap` e com userns proibido pelo
   kernel; o job morreu com código 127 depois de baixar a base. A construção

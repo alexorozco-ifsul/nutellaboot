@@ -110,11 +110,17 @@ def _esquema(d: Path) -> dict:
 
 
 def get_model(name: str) -> dict | None:
+    """O modelo como sai pela API, com o formulário sem o `default_hash`
+    (`config.esquema_publico`). É o funil: toda rota que devolve o modelo passa
+    por aqui, e quem precisa do hash (o stuff, a validação) lê o formulário por
+    `get_schema`."""
+    from .config import esquema_publico
+
     tpl = fsdb.read_json(model_dir(name) / "model.json")
     if tpl is None:
         return None
     tpl["name"] = name
-    tpl["schema"] = _esquema(model_dir(name))
+    tpl["schema"] = esquema_publico(_esquema(model_dir(name)))
     return tpl
 
 

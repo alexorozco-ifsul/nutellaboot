@@ -148,3 +148,42 @@ def test_o_hash_da_senha_de_root_do_modelo_nao_sai_pela_api(client, lab, ha):
     from server.app.services import stuffgen
 
     assert f"NB_ROOT_PW_HASH='{segredo}'" in stuffgen.render("meulab")
+
+
+def test_nenhuma_rota_de_modelo_entrega_hash_de_senha(client, lab, ha):
+    """O filtro mora no funil (`store.get_model`), e não rota a rota: uma rota
+    nova que devolva o modelo já nasce sem o hash. Esta varredura pega, pelo
+    VALOR, toda rota de modelo do OpenAPI e as escritas que devolvem o modelo,
+    para a administração e para o sub-admin."""
+    for campo, senha in (("ROOT_PASSWORD", "da-organizacao"), ("LOCK_FALLBACK_PASSWORD", "destrava")):
+        r = client.patch(
+            f"/api/v1/models/oficial/schema/fields/{campo}", json={"default": senha}, headers=ha
+        )
+        assert r.status_code == 200, r.text
+    segredos = [
+        f["default_hash"] for f in store.get_schema("oficial")["fields"] if f.get("default_hash")
+    ]
+    assert len(segredos) == 2
+
+    hs = {"Authorization": f"Bearer {lab['code']}"}
+    rotas = [
+        caminho.replace("{name}", "oficial")
+        for caminho, metodos in client.app.openapi()["paths"].items()
+        if "get" in metodos
+        and caminho.startswith("/api/v1/models")
+        and "{" not in caminho.replace("{name}", "")
+    ]
+    assert "/api/v1/models/oficial" in rotas and "/api/v1/models/oficial/schema" in rotas
+    respostas = [client.get(rota, headers=h) for rota in rotas for h in (ha, hs)]
+    respostas += [
+        client.patch("/api/v1/models/oficial", json={"description": "prova"}, headers=ha),
+        client.post("/api/v1/models", json={"name": "derivado", "from": "oficial"}, headers=ha),
+        client.post("/api/v1/models/oficial/duplicate", json={"name": "copia2"}, headers=hs),
+        client.put("/api/v1/models/oficial/schema/locks", json={"locks": {"MINRAM": True}}, headers=ha),
+    ]
+    for r in respostas[-4:]:
+        assert r.status_code < 400, (r.request.method, r.request.url, r.text)
+    for r in respostas:
+        for segredo in segredos:
+            assert segredo not in r.text, f"{r.request.method} {r.request.url} entregou um hash de senha"
+        assert "default_hash" not in r.text, r.request.url
