@@ -187,6 +187,12 @@ def test_entrada_maratona_e_pulada(imagem, raiz):
 # --- a sobrescrita do filtro de /etc/hosts da base publicada
 
 
+# O script e o /etc/hosts como estão na camada base publicada
+# (maratonalinux2026, pacote maratona-firewall 20240530).
+FIXTURES = REPO / "tests" / "fixtures"
+BASE_PUBLICADA = (FIXTURES / "maratona-firewall-20240530.sh").read_text()
+HOSTS_DA_BASE = (FIXTURES / "hosts-maratonalinux2026").read_text()
+
 DESCARTA_PELO_IP = """#!/bin/bash
 awk -v ip="$IP" -v host="$HOSTNAME" '
     $1 == ip { next }
@@ -198,56 +204,100 @@ IP="$(head -n1 $LATAMHOST)"
 egrep -v "($IP|$HOSTNAME)" /etc/hosts > $TMPFILE
 """
 
+FIREWALL = REPO / "client/stuff/60-postmount.d/30-firewall.sh"
 
-def test_a_base_defeituosa_e_corrigida(imagem, raiz):
-    """A base publicada apaga linhas do /etc/hosts por SUBSTRING (o egrep sem
-    âncora): o hosts/maratona levava junto qualquer host do whitelist com
-    "maratona" no nome. Enquanto a base não for reconstruída, o boot troca o
-    script pela versão corrigida."""
+
+def _texto_embutido() -> str:
+    script = FIREWALL.read_text()
+    ini = script.index("<< 'NB3FWEOF'\n") + len("<< 'NB3FWEOF'\n")
+    return script[ini : script.index("\nNB3FWEOF\n", ini) + 1]
+
+
+def _gatilho_casa(texto: str, tmp_path) -> bool:
+    """Roda o `grep` do gatilho, como está no 30-firewall.sh, contra um texto."""
+    linha = next(l for l in FIREWALL.read_text().splitlines() if "grep -qF" in l)
+    grep = linha[linha.index("grep -qF") : linha.index('"$_fwsh"; then')]
+    alvo = tmp_path / "alvo.sh"
+    alvo.write_text(texto)
+    return subprocess.run(["sh", "-c", grep + ' "$1"', "_", str(alvo)]).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "velho",
+    [DEFEITUOSO, BASE_PUBLICADA, DESCARTA_PELO_IP],
+    ids=["egrep-20230113", "grep-20240530-base-publicada", "awk-que-descarta-pelo-ip"],
+)
+def test_a_base_defeituosa_e_corrigida(imagem, raiz, velho):
+    """O filtro do /etc/hosts do pacote errou de três jeitos, um por versão:
+    regex por SUBSTRING (o hosts/maratona levava qualquer entrada com
+    "maratona"), a mesma regex com `grep --invert-match` (a base publicada),
+    e o awk que descartava pelo IP (dois nomes atrás do mesmo proxy se
+    apagavam). A troca reconhecia só o primeiro, e nunca disparou na base
+    publicada. Os três são trocados pelo script corrigido."""
     alvo = raiz / "usr/share/maratona-firewall/maratona-firewall-configuration.sh"
-    alvo.write_text(DEFEITUOSO)
+    alvo.write_text(velho)
 
     r = roda_consumidor(imagem, "nb3_post_firewall", raiz)
     assert r.returncode == 0, r.stderr
-    texto = alvo.read_text()
-    assert "egrep -v" not in texto
-    assert 'awk -v host="$HOSTNAME"' in texto
-    assert "$1 == ip { next }" not in texto
+    assert alvo.read_text() == _texto_embutido()
     assert alvo.stat().st_mode & 0o111, "o serviço executa o script direto"
     ok = subprocess.run(["bash", "-n", str(alvo)], capture_output=True, text=True)
     assert ok.returncode == 0, ok.stderr
-    assert "patching maratona-firewall" in r.stdout + r.stderr
+    assert "with the /etc/hosts filter fix" in r.stdout + r.stderr
 
 
-def test_a_base_que_descarta_pelo_ip_e_corrigida(imagem, raiz):
-    """A primeira correção comparava campos, mas ainda descartava toda linha
-    com o mesmo IP: dois nomes atrás do mesmo proxy se apagavam e só o último
-    da ordem alfabética ficava no /etc/hosts. Essa base também é trocada."""
-    alvo = raiz / "usr/share/maratona-firewall/maratona-firewall-configuration.sh"
-    alvo.write_text(DESCARTA_PELO_IP)
+def test_o_texto_embutido_nao_dispara_o_gatilho(tmp_path):
+    """Quando a base vier com o pacote corrigido, a troca se aposenta sozinha:
+    o script corrigido não pode conter nenhum dos padrões do gatilho."""
+    assert _gatilho_casa(BASE_PUBLICADA, tmp_path)
+    assert not _gatilho_casa(_texto_embutido(), tmp_path)
 
-    r = roda_consumidor(imagem, "nb3_post_firewall", raiz)
+
+def _roda_filtro(script: str, entradas: dict, tmp_path) -> list[str]:
+    """Roda o script do firewall de verdade (com o `ufw` mudo) sobre o
+    /etc/hosts da base, com os hosts/ dados."""
+    d = tmp_path / f"fw{len(list(tmp_path.iterdir()))}"
+    (d / "hosts").mkdir(parents=True)
+    (d / "nada").mkdir()
+    for nome, ip in entradas.items():
+        (d / "hosts" / nome).write_text(ip + "\n")
+    hosts = d / "etc-hosts"
+    hosts.write_text(HOSTS_DA_BASE)
+    texto = (
+        script.replace("/usr/share/maratona-firewall/hosts/*", f"{d}/hosts/*")
+        .replace("/etc/maratona-firewall/hosts/*", f"{d}/nada/*")
+        .replace("/etc/maratona-firewall/ufwrules/*", f"{d}/nada/*")
+        .replace("/etc/hosts", str(hosts))
+    )
+    (d / "fw.sh").write_text(texto)
+    r = subprocess.run(
+        ["bash", "-c", f'ufw() {{ :; }}; export -f ufw; bash "{d}/fw.sh"'],
+        capture_output=True, text=True,
+    )
     assert r.returncode == 0, r.stderr
-    texto = alvo.read_text()
-    assert "$1 == ip { next }" not in texto
-    assert 'awk -v host="$HOSTNAME"' in texto
-    assert "patching maratona-firewall" in r.stdout + r.stderr
+    return hosts.read_text().splitlines()
 
 
-def test_dois_nomes_no_mesmo_ip_ficam_no_hosts(tmp_path):
-    """O filtro corrigido, rodado de verdade: o segundo nome não apaga o primeiro."""
-    script = (REPO / "client/stuff/60-postmount.d/30-firewall.sh").read_text()
-    filtro = script[script.index("awk -v host="):script.index("' /etc/hosts")] + "'"
-    hosts = tmp_path / "hosts"
-    hosts.write_text("127.0.0.1\tlocalhost\n")
-    for nome in ("moj.exemplo", "nutellaboot.exemplo"):
-        velho = hosts.read_text()
-        r = subprocess.run(["bash", "-c", filtro.replace('"$HOSTNAME"', '"' + nome + '"') + ' "$1"', "_", str(hosts)],
-                           capture_output=True, text=True, check=True)
-        hosts.write_text(r.stdout + "200.19.248.54\t" + nome + "\n")
-    linhas = hosts.read_text().splitlines()
-    assert "200.19.248.54\tmoj.exemplo" in linhas
-    assert "200.19.248.54\tnutellaboot.exemplo" in linhas
+def test_o_filtro_corrigido_no_hosts_real_da_base(tmp_path):
+    """No /etc/hosts da base publicada: a base perde o "moj" (mesmo IP do
+    nutellaboot) e o "boca.maratona.br" (substring de "maratona"); o script
+    corrigido mantém os dois, e o 127.0.1.1 fica só com o nome da máquina (a
+    base traz o da VM que a construiu)."""
+    entradas = {
+        "boca.maratona.br": "10.0.0.9",
+        "moj.sede": "200.19.248.54",
+        "nutellaboot.sede": "200.19.248.54",
+        "maratona": "127.0.1.1",
+    }
+    antes = _roda_filtro(BASE_PUBLICADA, entradas, tmp_path)
+    assert "200.19.248.54\tmoj.sede" not in antes
+    assert "10.0.0.9\tboca.maratona.br" not in antes
+
+    depois = _roda_filtro(_texto_embutido(), entradas, tmp_path)
+    for nome, ip in entradas.items():
+        assert f"{ip}\t{nome}" in depois, (nome, depois)
+    assert [l for l in depois if l.split()[:1] == ["127.0.1.1"]] == ["127.0.1.1\tmaratona"]
+    assert "127.0.0.1 localhost" in depois
 
 
 def test_a_base_ja_corrigida_fica_intacta(imagem, raiz):
@@ -259,7 +309,7 @@ def test_a_base_ja_corrigida_fica_intacta(imagem, raiz):
     r = roda_consumidor(imagem, "nb3_post_firewall", raiz)
     assert r.returncode == 0, r.stderr
     assert alvo.read_text() == "#!/bin/bash\n# sentinela: versao nova do pacote\n"
-    assert "patching" not in r.stdout + r.stderr
+    assert "filter fix" not in r.stdout + r.stderr
 
 
 # --- dconf: lista GVariant
