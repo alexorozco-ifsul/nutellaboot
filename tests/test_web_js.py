@@ -541,8 +541,24 @@ def test_o_padrao_de_lista_com_opcoes_nao_e_partido_na_virgula():
     pedaços e o servidor recusava ("item inválido"). Lista com opções usa o
     controle ordenado, como no configureitor."""
     texto = (REPO / "web" / "admin" / "formulario.js").read_text(encoding="utf-8")
-    assert 'i.value.split(",")' not in texto
     inicio = texto.index("function editorDePadrao(")
     fim = texto.index("function editorDeLista(")
-    assert "editorDeLista(f, aoMudar)" in texto[inicio:fim]
-    assert 'f.type === "list" && (f.options || []).length' in texto[inicio:fim]
+    trecho = texto[inicio:fim]
+    assert "editorDeLista(f, aoMudar)" in trecho
+    assert 'f.type === "list" && (f.options || []).length' in trecho
+    # a caixa de texto partida na vírgula é só da lista LIVRE: a com opções
+    # já saiu pelo editorDeLista antes dela
+    if 'i.value.split(",")' in trecho:
+        assert trecho.index("editorDeLista(f, aoMudar)") < trecho.index('i.value.split(",")')
+
+
+def test_a_lista_livre_nao_parte_o_par_nome_ip_no_espaco():
+    """Cada item do FIREWALL_ALLOWLIST é o par "NOME IP", com um espaço dentro.
+    O editor do padrão partia o texto em vírgula E espaço: o par virava dois
+    itens, o servidor recusava o nome sozinho, e o padrão não salvava pelo
+    console."""
+    texto = (REPO / "web" / "admin" / "formulario.js").read_text(encoding="utf-8")
+    trecho = texto[texto.index("function editorDePadrao("):texto.index("function editorDeLista(")]
+    assert ".split(" in trecho
+    for m in re.finditer(r"\.split\(([^)]*)\)", trecho):
+        assert "\\s" not in m.group(1) and m.group(1).strip() != '" "', m.group(0)
