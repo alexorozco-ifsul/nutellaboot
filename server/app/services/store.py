@@ -628,14 +628,16 @@ def delete_site_image(image_id: str) -> None:
     # do diretório da imagem e só o usb.json sabe o nome deles: sem isto o
     # rmtree deixava um .img órfão e um publish/*.json que o retry_failed
     # tentaria reenviar. O .img.gz no servidor de arquivos fica (não há rota
-    # de remoção lá).
+    # de remoção lá). O pendrive de instalação (usb-install.json) leva a mesma
+    # chave de boot, e sai junto.
     from . import publish, usb
 
-    estado = fsdb.read_json(d / "usb.json", {}) or {}
-    nome = estado.get("file")
-    if nome:
-        usb.file_path(nome).unlink(missing_ok=True)
-        publish._state_path(nome).unlink(missing_ok=True)
+    for estado_json in ("usb.json", "usb-install.json"):
+        estado = fsdb.read_json(d / estado_json, {}) or {}
+        nome = estado.get("file")
+        if nome:
+            usb.file_path(nome).unlink(missing_ok=True)
+            publish._state_path(nome).unlink(missing_ok=True)
     shutil.rmtree(d)
 
 

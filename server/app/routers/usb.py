@@ -122,6 +122,7 @@ async def estado_da_sala(image: str, p=Depends(auth.require_image_access())) -> 
         "kernel": usb.kernel_state(usb.build_da_sede(image)),
         "generic": usb.generic_state(),
         "image": usb.image_state(image),
+        "installer": usb.instalador_state(image),
     }
 
 
@@ -134,6 +135,15 @@ async def gerar_da_sala(image: str, p=Depends(auth.require_image_access())) -> d
     """
     usb.agendar(image, forcado=True)
     return usb.image_state(image)
+
+
+@router.post("/site-images/{image}/usb/installer", status_code=202)
+async def gerar_instalador(image: str, p=Depends(auth.require_image_access())) -> dict:
+    """Gera o pendrive de instalação desta sala (instala no disco e apaga o
+    que estiver nele, se o técnico escolher). Quem pode gerar o pendrive da
+    sala pode gerar este: é o mesmo arquivo com duas entradas a mais no menu."""
+    usb.agendar_instalador(image)
+    return usb.instalador_state(image)
 
 
 # --- downloads (o navegador carrega sozinho: não há cabeçalho para mandar) ---
@@ -160,6 +170,14 @@ async def baixar_da_sala(image: str, request: Request, tk: str = Query("")):
     if p is None or not p.can_see_image(image):
         raise HTTPException(401, "credencial ausente ou inválida")
     return _entregar(usb.image_state(image))
+
+
+@router.get("/site-images/{image}/usb/installer/image")
+async def baixar_instalador(image: str, request: Request, tk: str = Query("")):
+    p = auth.principal_de_link(request, tk, image)
+    if p is None or not p.can_see_image(image):
+        raise HTTPException(401, "credencial ausente ou inválida")
+    return _entregar(usb.instalador_state(image))
 
 
 @router.get("/usb/generic/image")

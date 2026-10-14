@@ -110,6 +110,8 @@ mandar a chave no corpo; `aria2c` e `curl` usam o cabeçalho.
 | GET/POST | `/boot/v3/{img}/roster/logos/{org}` | B | tela de bloqueio | SVG ou PNG do logotipo |
 | GET/POST | `/boot/v3/{img}/usb` | B | `stuff` | `BUILD <id>` e, nas linhas seguintes, `MD5 ARQUIVO URL` (mesmo formato do manifest) |
 | GET/POST | `/boot/v3/{img}/usbfile/{nome}` | B | `stuff` | o `vmlinuz` ou o `initrd.img` do par desta sede |
+| GET/POST | `/boot/v3/{img}/install` | B | `stuff` (instalador) | `IMAGE <md5> <bytes> <arquivo> <url>…` (a imagem do pendrive da sede), `WAIT <motivo>` enquanto ela é gerada, ou `FAIL <motivo>` |
+| GET/POST | `/boot/v3/{img}/installfile/{arquivo}` | B | `stuff` (instalador) | a imagem do pendrive desta sede; só o arquivo atual dela, o resto é 404 |
 
 O join respeita o limite `SEEDMAX` da configuração da imagem (padrão 4):
 pool cheio responde **200 com `accepted=f`** — não é erro, a máquina só pula
@@ -842,11 +844,22 @@ lista, que é o que lhes dá prioridade no overlayfs.
 | GET | `/api/v1/usb` | A | — | `{kernel, kernels:[…], generic, auto_generate, images:[…]}` |
 | GET | `/api/v1/usb/kernels` | A | — | `{kernels:[{name, default, ok, build, kernel, models, hint, …}]}` |
 | POST | `/api/v1/usb/generic` | A | — | `202` + estado (gera em segundo plano) |
-| GET | `/api/v1/site-images/{img}/usb` | C, I | — | `{kernel, generic, image}` (`kernel` é o par desta sede) |
+| GET | `/api/v1/site-images/{img}/usb` | C, I | — | `{kernel, generic, image, installer}` (`kernel` é o par desta sede) |
 | POST | `/api/v1/site-images/{img}/usb` | C, I | — | `202` + estado |
+| POST | `/api/v1/site-images/{img}/usb/installer` | C, I | — | `202` + estado do pendrive de instalação (gera em segundo plano) |
 | GET | `/api/v1/site-images/{img}/usb/conf` | C, I, `?tk=` | — | `nutellaboot.conf` (texto) |
 | GET | `/api/v1/site-images/{img}/usb/image` | C, I, `?tk=` | — | **302** para o `.img.gz` no servidor de arquivos, ou a imagem compactada aqui |
+| GET | `/api/v1/site-images/{img}/usb/installer/image` | C, I, `?tk=` | — | o pendrive de instalação, compactado aqui (ele não é publicado) |
 | GET | `/api/v1/usb/generic/image` | C, `?id=&tk=` | — | idem, para a genérica |
+
+**O pendrive de instalação** é o da sala com duas entradas a mais no menu do
+GRUB: instalar no disco inteiro (apaga o disco) e instalar ao lado do Windows
+(só UEFI). O padrão do menu continua sendo o boot normal. Ele sai só sob
+demanda e não vai para o servidor de arquivos. Quem instala não lê nada dele
+depois do conf: a rota `/boot/v3/{img}/install` aponta a imagem do pendrive
+da sede, que o instalador baixa, confere e grava. Imagem de antes do
+instalador (sem `md5` e `layout` no estado) é gerada de novo ali mesmo, e a
+rota responde `WAIT` até ela ficar pronta.
 
 **As duas rotas de imagem redirecionam.** Quando a cópia publicada corresponde
 à construção atual, elas respondem `302` para o `.img.gz` no

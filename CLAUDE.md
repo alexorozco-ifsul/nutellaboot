@@ -54,7 +54,12 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
    o carregador (iPXE) põe o conf dentro do initrd, em `/nutellaboot.conf`; o
    initrd não procura a NB3CFG e marca `NB_NETBOOT`, que faz o
    `25-usbupdate.sh` avisar em vez de regravar. Quem liga `NB_NETBOOT` é o
-   arquivo, nunca a cmdline. Há teste.
+   arquivo, nunca a cmdline. Instalado ao lado do Windows, o GRUB da ESP
+   entrega do mesmo jeito o conf, o `wifi.conf` e o marcador `/nb3-disco`, que
+   liga `NB_DISKBOOT` (e não o `NB_NETBOOT`): a regravação vai para
+   `nutellaboot/boot/`. Com duas NB3CFG (pendrive numa máquina instalada no
+   disco), vale a do UUID que o GRUB passou em `nb3cfg=`, e o stuff regrava
+   essa (`NB_CFG_DEV`). Há teste.
 
 10. **`/api/v1/images/...` continua respondendo, para sempre.** O agente de
     telemetria (`client/telemetry/usr/share/mlog/agent.sh`) monta
@@ -204,6 +209,31 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     tudo que a produção precisa é ARQUIVO versionado (`deploy/`, `systemd/`) e
     não instrução em comentário. O procedimento está em `docs/operations.md`.
 
+21. **O instalador apaga discos, e por isso só com prova e sem pergunta.**
+    `client/stuff/27-install.sh` (`nb3install=disco|lado`, posto pelo menu do
+    pendrive de instalação, `nb3-genusb --installer`) é da mesma classe do
+    `25-usbupdate.sh`. As regras:
+    - sem a flag, não faz nada (há teste que roda o `nb_install` sem ela);
+    - nunca escolhe disco removível, USB, nem aquele de onde o boot veio. No
+      rig de VM o pendrive é um disco IDE comum, então o disco do boot sai
+      pelo NOME (`NB_CFG_DEV` ou o UUID de `nb3cfg=`), e initrd que não diz
+      de onde veio não instala;
+    - empate entre discos não se decide: a tela lista, e nada é apagado;
+    - a imagem é baixada para a RAM e conferida pelo md5 ANTES de tocar no
+      disco;
+    - nenhuma tecla (invariante 5). A confirmação é a escolha no menu, e a
+      tela conta 30 s; `mke2fs` sempre com `-F` e a entrada vazia, porque
+      diante de um NTFS velho ele pergunta;
+    - o disco gravado ganha assinatura de MBR e número de série de FAT novos
+      (nas duas cópias do setor de boot), ou a entrada do firmware e o
+      `nb3cfg=` podem apontar para o pendrive;
+    - ao lado do Windows nada do Windows muda, e a desinstalação só leva a
+      entrada do firmware com o rótulo exato `Maratona Linux`;
+    - o GRUB gravado nunca é atualizado (a autoatualização só troca kernel e
+      initrd): a imagem da sede carrega `layout` no estado
+      (`usb.GRUB_LAYOUT`), e a rota `/boot/v3/<sede>/install` regera as de
+      desenho anterior. Há teste (`tests/test_install.py`).
+
 ## Nomenclatura
 
 - **modelo** (`model`, `data/models/<n>/model.json`): o que se configura uma
@@ -248,7 +278,7 @@ o primeiro. Rota nova de console usa `require_console` + as funções de
 ```bash
 tools/nb3-init                     # instalação nova: emite e IMPRIME a chave
 tools/nb3-dev                      # servidor em 127.0.0.1:8890
-.venv/bin/python -m pytest -q      # 1300 testes, ~4 min
+.venv/bin/python -m pytest -q      # 1374 testes, ~4 min
 tools/nb3-seed-testdata            # dados de teste (não é instalação)
 tools/nb3-layer-worker --check     # confere as ferramentas rootless
 ```

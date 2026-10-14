@@ -73,6 +73,11 @@ def sh(tmp_path):
             "NB_USB_LIVRE_WAIT": "0",
             # o conf do netboot, que só existe quando o teste o cria
             "NB_NETCONF": str(tmp_path / "netboot" / "nutellaboot.conf"),
+            # o boot do disco (ao lado do Windows) e o sysfs: nunca os do host
+            "NB_DISKMARK": str(tmp_path / "netboot" / "nb3-disco"),
+            "NB_DISKWIFI": str(tmp_path / "netboot" / "wifi.conf"),
+            "NB_CFG_BYUUID": str(tmp_path / "by-uuid"),
+            "NB_SYS_BLOCK": str(tmp_path / "sys-class-block"),
             **{k: str(v) for k, v in env.items()},
         }
         r = subprocess.run(["sh", "-c", full], capture_output=True, text=True, env=e)
@@ -193,6 +198,9 @@ DO_INITRD = {
     "ip", "hostname", "date", "readlink", "basename", "dirname", "mktemp",
     "logger", "reboot", "poweroff", "run-parts", "find", "xargs", "id",
     "sysctl", "swapoff", "mkswap", "touch", "seq", "env", "tee", "stty",
+    # do busybox, conferidos na listagem do initrd (2026-10-14): o instalador
+    # mede a pasta antiga na ESP e relê a tabela de partições
+    "du", "blockdev",
 }
 
 
@@ -705,3 +713,138 @@ def test_servico_para_rapido_apesar_do_long_poll():
     teto = int(re.search(r"^TimeoutStopSec=(\d+)$", servico, re.M).group(1))
     assert gracioso <= 15
     assert gracioso < teto <= 30, "o systemd tem de dar tempo ao uvicorn, mas não 90 s"
+
+
+# --- instalado no disco (client/stuff/27-install.sh) ---
+
+
+def _boot_do_disco(sh, conf: str | None = CONF_BOM, wifi: str | None = "Rede\tsenha-boa\r\n"):
+    """O que o GRUB da ESP entrega dentro do initrd no modo `lado`: o conf, o
+    wifi.conf e o marcador."""
+    d = sh.tmp / "netboot"
+    d.mkdir(exist_ok=True)
+    if conf is not None:
+        (d / "nutellaboot.conf").write_text(conf)
+    if wifi is not None:
+        (d / "wifi.conf").write_text(wifi)
+    (d / "nb3-disco").write_text("")
+
+
+def test_boot_do_disco_le_conf_e_wifi_do_carregador(sh):
+    """Ao lado do Windows não há pendrive nem NB3CFG: o GRUB entrega o conf e o
+    wifi.conf como o iPXE entrega o conf. Não é boot pela rede — o NB_NETBOOT
+    desligaria a autoatualização —, e o wifi tem de chegar ao supplicant."""
+    _boot_do_disco(sh)
+    contador = sh.tmp / "busca.count"
+    sh.stub("blkid", f'echo x >> "{contador}"; exit 2\n')
+    out = sh(
+        'nb_read_usbconfig; echo "I=$IMAGEROOT K=$NB_BOOT_KEY DISK=[$NB_DISKBOOT] NET=[$NB_NETBOOT]"',
+        NB_CFG_BYLABEL=str(sh.tmp / "nao-existe"),
+    )
+    assert "I=sala9 K=nb3b_abc DISK=[1] NET=[]" in out
+    assert not contador.exists(), "procurou a NB3CFG num boot do disco"
+    assert not (sh.tmp / "usb-livre").exists(), "não há pendrive para tirar"
+    # a cópia na RAM sai limpa (sem o CR do Windows), como a do pendrive
+    assert (sh.run_dir / "wifi.conf").read_text() == "Rede\tsenha-boa\t\n"
+    assert "REBOOT-CHAMADO" not in out
+
+
+def test_boot_do_disco_sem_conf_para_com_a_causa(sh):
+    """O marcador sem o conf é GRUB mal configurado: a causa vai para a tela,
+    em vez de 40 s procurando uma NB3CFG que não existe."""
+    _boot_do_disco(sh, conf=None)
+    out = sh("nb_read_usbconfig; echo NAO-DEVERIA-CHEGAR-AQUI")
+    assert "did not load nutellaboot.conf" in out
+    assert "REBOOT-CHAMADO" in out
+    assert "NAO-DEVERIA-CHEGAR-AQUI" not in out
+
+
+def test_a_cmdline_nao_liga_o_boot_do_disco(sh):
+    """Como o NB_NETBOOT: quem diz que o boot veio do disco é o marcador."""
+    (sh.run_dir / "nutellaboot.conf").write_text(CONF_BOM)
+    out = sh('NB_DISKBOOT=1; nb_read_usbconfig; echo "DISK=[$NB_DISKBOOT]"')
+    assert "DISK=[]" in out
+
+
+def _particao(sh, nome: str, *, usb: bool = False, removable: str = "0") -> Path:
+    """Uma partição de mentira: o nó em /dev e o caminho no sysfs."""
+    disco = nome.rstrip("0123456789")
+    barramento = "usb2/2-1/host6" if usb else "ata1/host0"
+    d = sh.tmp / "sys-devices" / barramento / "block" / disco
+    (d / nome).mkdir(parents=True, exist_ok=True)
+    (d / "removable").write_text(removable + "\n")
+    classe = sh.tmp / "sys-class-block"
+    classe.mkdir(exist_ok=True)
+    if not (classe / nome).exists():
+        (classe / nome).symlink_to(d / nome)
+    no = sh.tmp / "dev" / nome
+    no.parent.mkdir(exist_ok=True)
+    no.write_text("")
+    return no
+
+
+def test_le_a_particao_de_onde_o_grub_bootou(sh):
+    """Pendrive espetado numa máquina já instalada: duas NB3CFG. O GRUB passa o
+    UUID da partição de onde bootou (`nb3cfg=`, em minúsculas), e é ela que se
+    lê — o link por label é de quem o udev viu por último."""
+    _pendrive_de_mentira(sh)
+    certo = _particao(sh, "sdb1", usb=True)
+    errado = _particao(sh, "sda1")
+    (sh.tmp / "by-uuid").mkdir()
+    (sh.tmp / "by-uuid" / "60F8-3978").symlink_to(certo)
+    label = sh.tmp / "by-label"
+    label.symlink_to(errado)
+    montados = sh.tmp / "montados"
+    fake = sh.tmp / "fakecfg"
+    sh.stub("mount", f'echo "$3" >> "{montados}"; mkdir -p "$4"; cp "{fake}"/* "$4"/; exit 0\n')
+    out = sh(
+        'nb3cfg=60f8-3978; nb_read_usbconfig; echo "I=$IMAGEROOT DEV=$NB_CFG_DEV"',
+        NB_CFG_BYLABEL=str(label),
+    )
+    assert f"DEV={certo}" in out
+    assert montados.read_text().split() == [str(certo)]
+    # pendrive de verdade: a faixa "pode retirar" aparece
+    assert (sh.tmp / "usb-livre").is_file()
+
+
+def test_uuid_que_nao_aparece_cai_no_label(sh):
+    """Um UUID que nunca aparece (FAT refeita à mão) não pode deixar a máquina
+    sem conf: depois das primeiras tentativas o label volta a valer."""
+    _pendrive_de_mentira(sh)
+    pendrive = _particao(sh, "sdb1", usb=True)
+    label = sh.tmp / "by-label"
+    label.symlink_to(pendrive)
+    contador = sh.tmp / "settle.count"
+    sh.stub("udevadm", f'echo x >> "{contador}"; exit 0\n')
+    out = sh(
+        'nb3cfg=dead-beef; nb_read_usbconfig; echo "I=$IMAGEROOT DEV=$NB_CFG_DEV"',
+        NB_CFG_BYLABEL=str(label),
+        NB_CFG_TRIES="10",
+        NB_CFG_UUID_TRIES="3",
+    )
+    assert f"I=sala9 DEV={pendrive}" in out
+    # esperou o UUID nas três primeiras voltas, e leu na quarta
+    assert len(contador.read_text().split()) == 4
+
+
+def test_disco_interno_nao_manda_tirar_pendrive(sh):
+    """Instalado no disco inteiro, a NB3CFG é do próprio disco: a faixa "pode
+    retirar o pendrive" seria mentira a cada boot."""
+    _pendrive_de_mentira(sh)
+    disco = _particao(sh, "sda1")
+    label = sh.tmp / "by-label"
+    label.symlink_to(disco)
+    out = sh('nb_read_usbconfig; echo "I=$IMAGEROOT DEV=$NB_CFG_DEV"', NB_CFG_BYLABEL=str(label))
+    assert f"I=sala9 DEV={disco}" in out
+    assert not (sh.tmp / "usb-livre").exists()
+
+
+def test_sem_prova_de_disco_interno_e_pendrive(sh):
+    """Disco removível (o leitor de cartão, o pendrive que se diz fixo pelo
+    barramento USB) continua sendo pendrive: na dúvida, a faixa aparece."""
+    _pendrive_de_mentira(sh)
+    cartao = _particao(sh, "sdc1", removable="1")
+    label = sh.tmp / "by-label"
+    label.symlink_to(cartao)
+    sh('nb_read_usbconfig; echo "I=$IMAGEROOT"', NB_CFG_BYLABEL=str(label))
+    assert (sh.tmp / "usb-livre").is_file()

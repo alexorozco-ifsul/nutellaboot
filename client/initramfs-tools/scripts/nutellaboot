@@ -2,8 +2,9 @@
 # NutellaBoot 3 — bootstrap do initrd (selecionado por boot=nutellaboot).
 #
 # Responsabilidades, nesta ordem:
-#   1. ler a configuração: a que o carregador de boot da rede entregou dentro
-#      do initrd (netboot) ou a da partição do pendrive (label NB3CFG);
+#   1. ler a configuração: a que o carregador de boot entregou dentro do
+#      initrd (netboot, ou o GRUB do disco quando instalado ao lado do
+#      Windows) ou a da partição NB3CFG (pendrive, ou disco instalado inteiro);
 #   2. subir a rede — WIFI INCLUSIVE, com espera real de associação;
 #   3. acertar o relógio (RTC errado invalida certificado);
 #   4. baixar o stuff do servidor por HTTPS VERIFICADO e executá-lo.
@@ -22,6 +23,14 @@ NB_CFG_BYLABEL=${NB_CFG_BYLABEL:-/dev/disk/by-label/NB3CFG}
 # nutellaboot.conf como um arquivo a mais no initrd — no iPXE,
 # `initrd nutellaboot.conf /nutellaboot.conf`.
 NB_NETCONF=${NB_NETCONF:-/nutellaboot.conf}
+# Instalado ao lado do Windows (27-install.sh, modo `lado`): o GRUB da ESP
+# entrega o conf do mesmo jeito, e junto o wifi.conf e este marcador. É o
+# marcador que diz que o boot veio do disco e não da rede.
+NB_DISKMARK=${NB_DISKMARK:-/nb3-disco}
+NB_DISKWIFI=${NB_DISKWIFI:-/wifi.conf}
+# a partição de onde o GRUB bootou (`nb3cfg=<UUID>`, posto pelo grub.cfg)
+NB_CFG_BYUUID=${NB_CFG_BYUUID:-/dev/disk/by-uuid}
+NB_SYS_BLOCK=${NB_SYS_BLOCK:-/sys/class/block}
 # marcador "o pendrive já pode sair" (o stuff o consulta); parametrizado para
 # o teste do ramo de sucesso da leitura não escrever em /run
 NB_USB_LIVRE_MARK=${NB_USB_LIVRE_MARK:-/run/nutellaboot-usb-livre}
@@ -116,12 +125,40 @@ nb_conf_value() {
 # bloco da máquina e fica preso enquanto um disco doente responde reset — no
 # campo foram 33 s de reset de um SATA morrendo, o pendrive nunca foi lido e o
 # boot seguiu com o padrão embutido. O blkid fica como reserva.
+#
+# Antes de tudo, a partição de onde o GRUB bootou: o grub.cfg passa o UUID
+# dela em `nb3cfg=` (nb3-genusb). Com o pendrive espetado numa máquina já
+# instalada no disco existem DUAS NB3CFG, e o link por label é de quem o udev
+# viu por último. Nas primeiras tentativas ($1 é o número dela) só o UUID vale,
+# porque o link por label pode nascer antes, apontando para a outra; depois, o
+# label volta a valer: um UUID que nunca aparece (FAT refeita à mão) não pode
+# deixar a máquina sem conf. O GRUB escreve o UUID da FAT em minúsculas, e o
+# udev, em maiúsculas.
 nb_cfg_device() {
+    if [ -n "${nb3cfg:-}" ]; then
+        _ncd_u=$(printf '%s' "$nb3cfg" | tr 'a-f' 'A-F')
+        if [ -e "$NB_CFG_BYUUID/$_ncd_u" ]; then
+            readlink -f "$NB_CFG_BYUUID/$_ncd_u"
+            return 0
+        fi
+        [ "${1:-99}" -lt "${NB_CFG_UUID_TRIES:-5}" ] && return 1
+    fi
     if [ -e "$NB_CFG_BYLABEL" ]; then
         readlink -f "$NB_CFG_BYLABEL"
         return 0
     fi
     blkid -L NB3CFG 2> /dev/null
+}
+
+# A partição está num disco interno (instalado no disco inteiro, 27-install.sh)?
+# Só com prova: o caminho no sysfs sem `usb` e o disco-pai com `removable` 0.
+# Na dúvida é pendrive, e a faixa "pode retirar" aparece como sempre apareceu.
+nb_dev_interno() {
+    _ndi_p=$(readlink -f "$NB_SYS_BLOCK/${1##*/}" 2> /dev/null)
+    [ -n "$_ndi_p" ] && [ -d "$_ndi_p" ] || return 1
+    case "$_ndi_p" in */usb*) return 1 ;; esac
+    # a partição mora dentro do diretório do disco, que tem o `removable`
+    [ "$(cat "${_ndi_p%/*}/removable" 2> /dev/null)" = 0 ]
 }
 
 # O conf veio com o kernel, pelo carregador de boot da rede, e não há pendrive
@@ -143,7 +180,7 @@ nb_read_usbpartition() {
     while :; do
         # dá ao udev a chance de fechar o evento do pendrive; 1 s no máximo
         command -v udevadm > /dev/null 2>&1 && udevadm settle --timeout=1 > /dev/null 2>&1
-        _dev=$(nb_cfg_device)
+        _dev=$(nb_cfg_device "$_try")
         [ -n "$_dev" ] && break
         _try=$((_try + 1))
         [ "$_try" -ge "${NB_CFG_TRIES:-20}" ] && break
@@ -162,9 +199,29 @@ nb_read_usbpartition() {
             nb_wifi_normalize "$NB_CFGMNT/wifi.conf" "$NB_RUN/wifi.conf"
         sync
         umount "$NB_CFGMNT"
-        nb_log "configuration read from the USB drive ($_dev)"
-        nb_usb_livre
+        # o stuff regrava ESTA partição quando o par fica para trás
+        NB_CFG_DEV=$_dev
+        if nb_dev_interno "$_dev"; then
+            nb_log "configuration read from the local disk ($_dev)"
+        else
+            nb_log "configuration read from the USB drive ($_dev)"
+            nb_usb_livre
+        fi
         [ -f "$NB_RUN/nutellaboot.conf" ] || _cfg_reason="mounted $_dev but nutellaboot.conf is missing"
+    fi
+}
+
+# Instalado ao lado do Windows: não há pendrive nem NB3CFG para procurar, e o
+# boot também não é pela rede. Quem diz isso é o marcador que o GRUB entregou,
+# nunca a cmdline (invariante 9).
+nb_read_diskconfig() {
+    NB_DISKBOOT=1
+    if [ -s "$NB_NETCONF" ]; then
+        cp "$NB_NETCONF" "$NB_RUN/nutellaboot.conf"
+        [ -f "$NB_DISKWIFI" ] && nb_wifi_normalize "$NB_DISKWIFI" "$NB_RUN/wifi.conf"
+        nb_log "configuration read from the boot loader on the local disk"
+    else
+        _cfg_reason="the boot loader on the local disk did not load nutellaboot.conf"
     fi
 }
 
@@ -175,9 +232,14 @@ nb_read_usbconfig() {
     _cmd_server=$NB_SERVER
     _cfg_reason=
     # Quem diz que o boot foi pela rede é o arquivo, nunca a cmdline: é o que
-    # desliga a regravação do pendrive (25-usbupdate.sh).
+    # desliga a regravação do pendrive (25-usbupdate.sh). O mesmo vale para o
+    # boot do disco, que muda o que a regravação grava.
     NB_NETBOOT=
-    if [ -e "$NB_NETCONF" ]; then
+    NB_DISKBOOT=
+    NB_CFG_DEV=
+    if [ -e "$NB_DISKMARK" ]; then
+        nb_read_diskconfig
+    elif [ -e "$NB_NETCONF" ]; then
         nb_read_netconfig
     else
         nb_read_usbpartition

@@ -388,6 +388,78 @@ de netboot para baixarem os dois arquivos de novo — e, se o **kernel** da cama
 base mudou, antes da prova: com o `vmlinuz` velho o sistema montado fica sem os
 módulos do kernel.
 
+#### Instalar no disco: a máquina boota sem pendrive
+
+O **pendrive de instalação** é o da sala com duas entradas a mais no menu do
+GRUB. O padrão do menu continua sendo o boot normal, e a instalação só começa
+se alguém escolher uma das duas:
+
+| Entrada | O que faz |
+|---|---|
+| **INSTALAR no disco inteiro** | APAGA o disco. A imagem do pendrive vai para o começo dele, e o resto vira a partição do sistema e o swap. BIOS e UEFI |
+| **INSTALAR ao lado do Windows** | Só UEFI, e nenhuma partição muda. O GRUB vai para a partição EFI do Windows; o kernel e o initrd ficam junto do sistema baixado. O Maratona Linux vira o padrão, e o Windows fica no menu por 10 s |
+
+**Para gerar a imagem:**
+- **no console:** na página da imagem, seção **Pendrive de boot**, item
+  **pendrive de instalação**, botões **Gerar** e depois **Baixar**. Ela sai só
+  sob demanda e não vai para o servidor de arquivos;
+- **na linha de comando:** o mesmo gerador, com `--installer`:
+
+```bash
+NB3_ADMIN_KEY=nb3a_... tools/nb3-genusb --installer \
+    --output 26brbr-instalador.img --imageroot 26brbr --fetch-key \
+    --server https://nutellaboot.mdp.naquadah.com.br
+```
+
+**Na máquina:**
+
+1. Ligue com o pendrive e escolha a entrada no menu.
+2. A máquina sobe a rede e baixa do servidor a imagem do pendrive da sede, a
+   mesma do console. Se ela ainda não existe ou está velha, o servidor a gera
+   na hora, e a tela espera.
+3. **Disco inteiro:**
+   - a tela mostra o disco escolhido (modelo, tamanho, o que há nele) e conta
+     30 s. **Para cancelar, desligue a máquina.** Nenhuma tecla é pedida;
+   - o disco escolhido é interno: SSD/NVMe antes de HD. Nunca é USB,
+     removível, nem o pendrive de onde a máquina bootou;
+   - com dois discos do mesmo tipo, nada é apagado: a tela lista os dois. Para
+     escolher, aperte `e` no menu e acrescente `nb3disk=sda` (o nome da lista)
+     ao fim da linha `linux`. `nb3swap=8` muda o swap de 4 para 8 GB, e
+     `nb3swap=0` tira o swap.
+4. **Ao lado do Windows:** o sistema vai para o espaço livre que o boot de
+   sempre usaria (30 GB numa NTFS ou ext4). As restrições de sempre valem: sem
+   Fast Startup, sem BitLocker nessa partição.
+5. A máquina mostra `DONE` e reinicia. **Tire o pendrive.** O primeiro boot
+   pelo disco baixa o sistema, como o primeiro boot de um pendrive.
+
+**Depois de instalado:**
+- **Atualização:** o disco se atualiza como o pendrive. O kernel e o initrd do
+  modelo são regravados no disco quando o servidor muda de par.
+- **"Remover o NutellaBoot deste computador" (factory reset):**
+  - ao lado do Windows, desfaz tudo (entrada do firmware, `\EFI\nutellaboot\`,
+    `nutellaboot/`), e o Windows volta a ser o padrão;
+  - no disco inteiro, apaga o sistema baixado e mantém a partição de boot: o
+    próximo boot baixa tudo de novo.
+
+**O que pode atrapalhar:**
+- **Secure Boot ligado:** o GRUB do pendrive não é assinado, então nem o
+  pendrive de instalação boota. Desligue no firmware, como para o pendrive de
+  sempre. Se alguém o religar depois, o firmware pula o Maratona e sobe o
+  Windows sem avisar.
+- **BitLocker:** mudar a cadeia de boot faz o Windows pedir a chave de
+  recuperação no próximo boot dele. Tenha a chave em mãos.
+- **Atualização do Windows:** pode pôr o Windows em primeiro na ordem do
+  firmware. Rodar o instalador de novo (ao lado do Windows) corrige, sem
+  apagar nada.
+- **Pendrive gerado antes do instalador:** para numa tela `TOO OLD`, sem tocar
+  em nada. Reconstrua o initrd (abaixo) e gere a imagem de novo.
+
+> **O instalador precisa do initrd novo.** O `sfdisk` e o `efibootmgr` vão
+> dentro do initrd a partir desta versão, e o bootstrap passou a ler o conf e o
+> wifi entregues pelo GRUB da partição EFI. Reconstruir o par
+> (`nb3-build-initrd`, os dois: o padrão e os nomeados) regrava, uma vez, o
+> pendrive de toda sede, e as sedes de netboot precisam dos arquivos novos.
+
 ### 1.6 Publicação de arquivos (files.mdp)
 
 Camadas têm vários GB e imagens de pendrive têm centenas de MB. Servir isso

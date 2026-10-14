@@ -35,6 +35,11 @@ nb3_mountroot() {
     nb_phase "STORAGE - looking for a disk to store the system"
     runpremountconfigs
 
+    # O pendrive de instalação (`nb3install=` na linha do kernel): depois das
+    # checagens de VM e de RAM, e antes de tudo que grava no disco. Instalado,
+    # reinicia; sem a flag, não faz nada.
+    nb_install
+
     # Depois do disco (é onde os arquivos novos são conferidos antes de tocar
     # no pendrive) e ANTES das camadas: não adianta baixar 6 GB para reiniciar
     # em seguida. Depois do reinício elas já estão em cache.

@@ -249,6 +249,123 @@ até elas copiarem os arquivos novos. Nada quebra — o stuff aceita initrd
 antigo —, mas uma troca de **kernel** na camada base exige o `vmlinuz` novo lá
 também: os módulos do sistema montado são os do kernel da base.
 
+## Instalado no disco, sem pendrive
+
+O sistema já mora no disco: camadas, home e swap ficam em `nutellaboot/`, numa
+partição ext4 ou NTFS da própria máquina. O pendrive só leva o **boot**: GRUB,
+kernel, initrd e `nutellaboot.conf`. Instalar é levar esses quatro para o
+disco. Quem faz é o pendrive de instalação (`nb3-genusb --installer`, ou o
+botão no console), que é o pendrive da sede com duas entradas a mais no menu.
+O padrão do menu continua sendo o boot normal.
+
+| Entrada | Linha do kernel | O que acontece |
+|---|---|---|
+| INSTALAR no disco inteiro | `nb3install=disco` | apaga o disco e o transforma num pendrive |
+| INSTALAR ao lado do Windows | `nb3install=lado` | só no UEFI; nenhuma partição muda |
+
+A lógica está em `client/stuff/27-install.sh`, que roda dentro do
+`nb3_mountroot` depois das checagens de VM e de RAM. Sem a flag, ela não faz
+nada. Os dados vêm do **servidor**, e não do pendrive:
+`/boot/v3/<sede>/install` aponta a imagem do pendrive da sede, a mesma do
+console, com o par do modelo. A imagem é baixada para a RAM e conferida pelo
+md5 antes de qualquer gravação. Por isso o pendrive pode sair na faixa de
+sempre, e uma sede com iPXE instala com uma entrada a mais no menu dela, sem
+pendrive nenhum. Imagem que ainda não existe, que está desatualizada ou que é
+de antes do instalador é gerada ali mesmo: a rota responde `WAIT` até ela
+ficar pronta, e o instalador pergunta de novo a cada 10 s.
+
+### Disco inteiro
+
+```
+setor 0        MBR: código do GRUB (BIOS) e tabela
+1 MiB          p1  FAT32 "NB3CFG", tipo EF   = a imagem do pendrive da sede (400 MB)
+p1 + 400 MB    p2  ext4 "NB3DATA"           = nutellaboot/ (camadas, home)
+fim - 4 GB     p3  swap "NB3SWAP"
+```
+
+1. **Escolha do disco.** O instalador escolhe um disco interno: SSD/NVMe
+   antes de HD. Nunca escolhe disco USB, removível ou aquele de onde o boot
+   veio. Com dois do mesmo tipo, mostra a lista e não apaga nada; o técnico
+   aperta `e` no menu e acrescenta `nb3disk=NOME` à linha do kernel.
+2. **Contagem.** Uma tela mostra o modelo, o tamanho e o que existe no disco,
+   e conta 30 s. Desligar a máquina cancela. Nenhuma tecla é pedida
+   (invariante 5).
+3. **Gravação.** A imagem vai para o começo do disco com `dd`, e o GPT
+   reserva que o Windows deixou no fim é apagado. Depois, o instalador:
+   - sorteia de novo a assinatura do MBR e o número de série da FAT (nas
+     duas cópias do setor de boot), porque o disco não pode ficar com a
+     identidade do pendrive;
+   - acrescenta p2 e p3 à tabela com `sfdisk --append`;
+   - formata a ext4 pelo deslocamento no disco inteiro, e o swap por um loop
+     sobre o pedaço dele. Assim nada depende de o kernel reler a tabela.
+4. **Firmware e reinício.** Em UEFI, a entrada "Maratona Linux" vai para o
+   firmware em primeiro lugar. A máquina reinicia, e o primeiro boot pelo
+   disco já confere a instalação.
+
+Daí em diante o boot do disco é o do pendrive. O initrd acha a NB3CFG (agora
+num disco interno, e por isso não mostra a faixa "pode retirar"). A
+autoatualização regrava o par nela. O swap usa a partição com o nosso rótulo,
+e nunca a de outro sistema, que pode guardar a hibernação dele. O factory
+reset apaga o sistema baixado e mantém a partição de boot. O tamanho do swap
+muda com `nb3swap=<GB>` na linha do kernel (0 é sem swap). O MBR limita a
+instalação aos primeiros 2 TiB do disco.
+
+### Ao lado do Windows (só UEFI)
+
+- **Partições:** nenhuma muda. O sistema usa a partição que o boot de sempre
+  escolheria, a NTFS ou ext4 com 30 GB livres.
+- **Na ESP**, em `\EFI\nutellaboot\`, ficam o GRUB, o `grub.cfg` e os
+  arquivos que o GRUB entrega ao initrd. A ESP não tem letra no Windows,
+  então a chave de boot não fica em `C:\`.
+- **Kernel e initrd** ficam em `nutellaboot/boot/`, na partição do sistema. A
+  ESP do Windows costuma ter 100 MB e não cabe o par. O instalador confere o
+  espaço livre para o GRUB (~13 MB) antes de gravar.
+- **Os arquivos entregues ao initrd** (o `nutellaboot.conf`, o `wifi.conf` e
+  o marcador `nb3-disco`) vão num cpio, o `nb3conf.cpio` que o instalador
+  grava na ESP. O GRUB o passa como segundo initrd, e os três aparecem na
+  raiz, como o conf do iPXE. O `newc:` do GRUB faria isso sem o cpio, mas o
+  carregador EFI do GRUB do Fedora não o conhece (visto em VM). O marcador
+  liga o `NB_DISKBOOT`, e o `NB_NETBOOT` continua sendo só do boot pela rede.
+  Quem diz isso é o arquivo, nunca a linha de comando (invariante 9). Trocar
+  a chave de boot exige instalar de novo, como exige regravar o pendrive.
+- **Autoatualização:** com `NB_DISKBOOT` ela troca o par em
+  `nutellaboot/boot/` por `mv`, no mesmo disco onde o conferiu.
+- **Menu:** o "Maratona Linux" é o padrão, e a última entrada é "Windows" (o
+  `bootmgfw.efi`), com 10 s para escolher.
+- **Remover o NutellaBoot:** desfaz tudo: a entrada do firmware,
+  `\EFI\nutellaboot\` e `nutellaboot/`. O Windows volta a ser o padrão,
+  exatamente como estava.
+- **O que o Windows impõe:**
+  - o Secure Boot tem de estar desligado, como no pendrive;
+  - com BitLocker, mudar a cadeia de boot faz o Windows pedir a chave de
+    recuperação;
+  - uma atualização do Windows pode pôr o Windows de volta em primeiro na
+    ordem do firmware, e rodar o instalador de novo corrige.
+- **BIOS legado:** não instala ao lado; seria reescrever o MBR do Windows.
+
+### Um GRUB só, e a partição de onde ele bootou
+
+O `BOOTX64.EFI` (e o `core.img` do BIOS) que o `nb3-genusb` gera serve aos
+três lugares, e procura nesta ordem:
+1. o `nutellaboot.conf` na raiz de uma partição (o pendrive, ou a p1 do disco
+   inteiro);
+2. o rótulo `NB3CFG`;
+3. o menu na pasta `EFI/nutellaboot` da ESP (ao lado do Windows).
+
+Nada disso usa o `$cmdpath`, porque numa imagem standalone ele chega vazio
+(visto em VM).
+
+Com o pendrive espetado numa máquina já instalada existem duas NB3CFG, e o
+GRUB fica com a que achar primeiro. O `grub.cfg` dela passa o UUID da
+partição em `nb3cfg=`, então tudo fica na mesma partição:
+- o initrd lê o conf da que tem esse UUID (nas primeiras tentativas só ela
+  vale);
+- a autoatualização regrava a mesma partição (`NB_CFG_DEV`).
+
+O GRUB e o `grub.cfg` gravados nunca são atualizados (a autoatualização só
+troca kernel e initrd). Por isso a imagem da sede guarda a versão do desenho
+(`layout` no estado), e a rota do instalador regera as anteriores.
+
 ## Wifi
 
 O arquivo `wifi.conf`, na mesma partição, tem uma rede por linha com campos

@@ -270,6 +270,53 @@ async def usbfile(
     return FileResponse(caminho, media_type="application/octet-stream", filename=name)
 
 
+@router.get("/{image}/install", name="install")
+@router.post("/{image}/install", name="install_post")
+async def install(
+    image: str,
+    request: Request,
+    x_nb_boot_key: str | None = Header(None),
+    key: str | None = Query(None),
+) -> str:
+    """O que o pendrive de instalação grava no disco (client/stuff/27-install.sh).
+
+    `IMAGE <md5> <bytes> <arquivo> <url>...` (a imagem do pendrive da sede),
+    `WAIT <motivo>` enquanto ela é gerada, ou `FAIL <motivo>`. O texto e a
+    regra moram em `usb.install_text`.
+    """
+    await _autorizar(request, image, x_nb_boot_key, key)
+    from ..services import usb
+
+    return usb.install_text(image)
+
+
+@router.get("/{image}/installfile/{name}", name="installfile")
+@router.post("/{image}/installfile/{name}", name="installfile_post")
+async def installfile(
+    image: str,
+    name: str,
+    request: Request,
+    x_nb_boot_key: str | None = Header(None),
+    key: str | None = Query(None),
+):
+    """A imagem do pendrive desta sede, para o instalador.
+
+    É a reserva do servidor de arquivos. `name` só vale se for EXATAMENTE o
+    arquivo atual desta sede: é caminho vindo da URL indo para o disco, e o
+    diretório tem a imagem (e a chave de boot) de todas as outras.
+    """
+    await _autorizar(request, image, x_nb_boot_key, key)
+    from ..services import usb
+
+    estado = usb.image_state(image)
+    if estado.get("status") != "done" or name != estado.get("file"):
+        raise HTTPException(404, "arquivo não existe")
+    caminho = usb.file_path(name)
+    if not caminho.is_file():
+        raise HTTPException(404, "arquivo não existe")
+    return FileResponse(caminho, media_type="application/octet-stream", filename=name)
+
+
 @router.get("/{image}/clionkey", name="clionkey")
 @router.post("/{image}/clionkey", name="clionkey_post")
 async def clionkey(

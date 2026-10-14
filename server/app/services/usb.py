@@ -51,6 +51,16 @@ TIMEOUT = 1800
 
 DEFAULT = {"auto_generate": True, "size_mb": 400}
 
+# O desenho do GRUB que o `nb3-genusb` grava, carimbado no estado de cada
+# geração. O instalador (client/stuff/27-install.sh) copia o GRUB da imagem da
+# sede para o disco, e o GRUB e o grub.cfg gravados nunca mais mudam (a
+# autoatualização só troca kernel e initrd). Imagem de antes do 2 não serve
+# para instalar: o GRUB dela não acha o menu na ESP (modo `lado`) nem passa o
+# UUID da partição (`nb3cfg=`). Não vira motivo de "desatualizada" no console:
+# o pendrive dela continua bootando, e o aviso vermelho em toda sede no dia do
+# deploy seria ruído. Quem precisa, a rota do instalador, regera sozinha.
+GRUB_LAYOUT = 2
+
 
 def conf() -> dict:
     server = fsdb.read_json(settings.data_root / "server.json", {}) or {}
@@ -391,6 +401,10 @@ def _image_state_path(image_id: str) -> Path:
     return settings.data_root / "site-images" / image_id / "usb.json"
 
 
+def _installer_state_path(image_id: str) -> Path:
+    return settings.data_root / "site-images" / image_id / "usb-install.json"
+
+
 def _com_derivados(estado: dict, *, esperado_kernel: str, esperado_boot: str = "") -> dict:
     """Acrescenta `stale` e o motivo, calculados na leitura.
 
@@ -459,6 +473,23 @@ def image_state(image_id: str) -> dict:
     )
 
 
+def instalador_state(image_id: str) -> dict:
+    """O pendrive de instalação: o da sala com o menu de instalar no disco.
+
+    Sai só sob demanda e nunca é publicado: é usado de vez em quando, para
+    preparar um laboratório, e o caminho de exceção do `_entregar` (compactar
+    aqui) dá conta. Desatualizado pelos mesmos motivos do pendrive da sala.
+    """
+    estado = fsdb.read_json(_installer_state_path(image_id), {}) or {}
+    if not estado:
+        estado = {"status": "missing"}
+    return _com_derivados(
+        estado,
+        esperado_kernel=_kernel_fingerprint(build_da_sede(image_id)),
+        esperado_boot=_boot_fingerprint(image_id),
+    )
+
+
 def _sufixo(image_id: str) -> str:
     """O sufixo do nome do arquivo da sala, sorteado uma vez e mantido.
 
@@ -467,10 +498,11 @@ def _sufixo(image_id: str) -> str:
     Mantido estável entre gerações para que regerar sobrescreva o mesmo arquivo
     lá — o rsync não apaga o que ficou para trás.
     """
-    p = _image_state_path(image_id)
-    atual = fsdb.read_json(p, {}) or {}
-    if atual.get("suffix"):
-        return atual["suffix"]
+    # o pendrive de instalação usa o mesmo sufixo: também leva a chave
+    for p in (_image_state_path(image_id), _installer_state_path(image_id)):
+        atual = fsdb.read_json(p, {}) or {}
+        if atual.get("suffix"):
+            return atual["suffix"]
     return secrets.token_hex(4)
 
 
@@ -480,6 +512,10 @@ def _nome_generico() -> str:
 
 def _nome_da_sala(image_id: str, sufixo: str) -> str:
     return f"{image_id}-{sufixo}.img"
+
+
+def _nome_do_instalador(image_id: str, sufixo: str) -> str:
+    return f"{image_id}-{sufixo}-instalador.img"
 
 
 def file_path(nome: str) -> Path:
@@ -531,8 +567,21 @@ async def _rodar(args: list[str]) -> tuple[int, str]:
     return proc.returncode or 0, (saida or b"").decode(errors="replace")[-4000:]
 
 
+def _md5_de(caminho: Path) -> str:
+    h = hashlib.md5()
+    with open(caminho, "rb") as f:
+        while pedaco := f.read(4 * 1024 * 1024):
+            h.update(pedaco)
+    return h.hexdigest()
+
+
 async def _gerar(
-    caminho_estado: Path, nome: str, extras: list[str], build: str = "", **campos
+    caminho_estado: Path,
+    nome: str,
+    extras: list[str],
+    build: str = "",
+    publicar: bool = True,
+    **campos,
 ) -> dict:
     k = kernel_state(build)
     if not k["ok"]:
@@ -549,7 +598,7 @@ async def _gerar(
     # de um modelo com kernel próprio sairia com o kernel errado
     d = build_dir(build)
     args = ["--output", str(destino), "--kernel", str(d / "vmlinuz"), "--initrd", str(d / "initrd.img"), *extras]
-    if publish.enabled():
+    if publicar and publish.enabled():
         args.append("--publish")
 
     fingerprint = _kernel_fingerprint(build)
@@ -564,11 +613,16 @@ async def _gerar(
         return _marcar(caminho_estado, status="failed", error=saida.strip()[-800:] or f"código {rc}")
 
     tamanho = destino.stat().st_size if destino.is_file() else 0
+    # o md5 é do instalador, que confere a imagem antes de gravá-la no disco.
+    # Numa thread: são 400 MB, e o servidor tem um worker só (invariante 2).
+    md5 = await asyncio.to_thread(_md5_de, destino) if destino.is_file() else ""
     return _marcar(
         caminho_estado,
         status="done",
         file=nome,
         size=tamanho,
+        md5=md5,
+        layout=GRUB_LAYOUT,
         built_at=time.time(),
         kernel_fingerprint=fingerprint,
         boot_build=build,
@@ -583,25 +637,87 @@ async def gerar_generica() -> dict:
     return await _gerar(_generic_state_path(), _nome_generico(), [])
 
 
-async def gerar_da_sala(image_id: str) -> dict:
-    """A imagem já configurada para uma sala. Leva a chave de boot dentro."""
+def _extras_da_sala(image_id: str) -> list[str]:
     d = settings.data_root / "site-images" / image_id
     chave = (fsdb.read_text(d / "boot.key") or "").strip()
     info = fsdb.read_json(d / "image.json", {}) or {}
-    sufixo = _sufixo(image_id)
     extras = ["--imageroot", image_id, "--server", settings.base_url]
     if info.get("fullname"):
         extras += ["--fullname", info["fullname"]]
     if chave:
         extras += ["--boot-key", chave]
+    return extras
+
+
+async def gerar_da_sala(image_id: str) -> dict:
+    """A imagem já configurada para uma sala. Leva a chave de boot dentro."""
+    sufixo = _sufixo(image_id)
     return await _gerar(
         _image_state_path(image_id),
         _nome_da_sala(image_id, sufixo),
-        extras,
+        _extras_da_sala(image_id),
         build=build_da_sede(image_id),
         suffix=sufixo,
         boot_fingerprint=_boot_fingerprint(image_id),
     )
+
+
+async def gerar_instalador(image_id: str) -> dict:
+    """O pendrive de instalação da sala: o mesmo, com o menu de instalar."""
+    sufixo = _sufixo(image_id)
+    return await _gerar(
+        _installer_state_path(image_id),
+        _nome_do_instalador(image_id, sufixo),
+        [*_extras_da_sala(image_id), "--installer"],
+        build=build_da_sede(image_id),
+        publicar=False,
+        suffix=sufixo,
+        boot_fingerprint=_boot_fingerprint(image_id),
+    )
+
+
+# --- o que o instalador grava (client/stuff/27-install.sh) ---
+
+
+def install_text(image_id: str) -> str:
+    """A resposta de `/boot/v3/<sede>/install`, em texto puro (invariante 3).
+
+    `IMAGE <md5> <bytes> <arquivo> <url> [<url>...]`: a imagem do pendrive da
+    sala, que o instalador confere e grava no começo do disco (ou de onde tira
+    o GRUB e o par, no modo ao lado do Windows). A URL do servidor de arquivos
+    vem primeiro quando a cópia de lá é desta construção.
+
+    `WAIT <motivo>` quando ela não serve ainda (não existe, desatualizada, ou
+    gerada antes do instalador): a geração começa aqui, e o instalador pergunta
+    de novo a cada 10 s. `FAIL <motivo>` quando a última geração falhou: a
+    máquina para com a causa na tela, em vez de esperar para sempre.
+    """
+    estado = image_state(image_id)
+    status = estado.get("status")
+    if status in ("failed", "unavailable"):
+        erro = " ".join(str(estado.get("error") or status).split())[:200]
+        return f"FAIL the USB image of this site could not be generated: {erro}\n"
+    motivo = ""
+    if status == "building":
+        motivo = "generating the USB image of this site"
+    elif status != "done" or not estado.get("file"):
+        motivo = "the USB image of this site does not exist yet"
+    elif estado.get("stale"):
+        motivo = "the USB image of this site is out of date"
+    elif (estado.get("layout") or 0) < GRUB_LAYOUT or not estado.get("md5"):
+        motivo = "the USB image of this site predates the installer"
+    elif not file_path(estado["file"]).is_file():
+        motivo = "the USB image file is missing on the server"
+    if motivo:
+        if status != "building":
+            agendar(image_id, forcado=True)
+        return f"WAIT {motivo}\n"
+    urls = []
+    publicada = url_publicada_atual(estado)
+    if publicada:
+        urls.append(publicada)
+    urls.append(f"{settings.base_url}/boot/v3/{image_id}/installfile/{estado['file']}")
+    return f"IMAGE {estado['md5']} {estado.get('size', 0)} {estado['file']} {' '.join(urls)}\n"
 
 
 # --- agendamento ---
@@ -642,6 +758,13 @@ def agendar(image_id: str, *, forcado: bool = False) -> bool:
     if generic_state().get("status") == "missing":
         agendar_generica()
     return _agendar(gerar_da_sala(image_id))
+
+
+def agendar_instalador(image_id: str) -> bool:
+    """O pendrive de instalação, sempre pedido por alguém (nada automático)."""
+    if instalador_state(image_id).get("status") == "building":
+        return False
+    return _agendar(gerar_instalador(image_id))
 
 
 def agendar_generica(*, forcado: bool = False) -> bool:

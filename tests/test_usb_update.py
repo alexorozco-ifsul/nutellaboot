@@ -423,3 +423,70 @@ def test_o_stuff_chama_a_verificacao_antes_das_camadas():
     assert "nb_usb_update" in main
     assert main.index("runpremountconfigs\n") < main.index("nb_usb_update")
     assert main.index("nb_usb_update") < main.index("mount_layers")
+
+
+# --- instalado no disco (client/stuff/27-install.sh) ---
+
+
+def test_ao_lado_do_windows_regrava_o_par_em_nutellaboot_boot(cenario):
+    """Ao lado do Windows o par mora em nutellaboot/boot/, na partição do
+    sistema. O pendrive não existe: procurar a NB3CFG pararia a máquina na tela
+    OLD USB. A troca é um `mv` no mesmo disco onde o par foi conferido."""
+    boot = cenario.storage / "boot"
+    boot.mkdir(parents=True)
+    (boot / "vmlinuz").write_bytes(b"kernel velho")
+    (boot / "initrd.img").write_bytes(b"initrd velho")
+    (boot / "nb3-disco").write_text("marcador")
+    (cenario.tmp / "plugado").unlink()
+    r = roda(cenario, extra="NB_DISKBOOT=1")
+    assert (boot / "vmlinuz").read_bytes() == VMLINUZ, r.stdout
+    assert (boot / "initrd.img").read_bytes() == INITRD
+    assert (boot / "nb3-disco").read_text() == "marcador"
+    assert cenario.pendrive.joinpath("vmlinuz").read_bytes() == b"kernel velho"
+    assert "OLD USB" not in r.stdout
+    assert "boot files on this computer's disk" in r.stdout
+    assert "REBOOT" in cenario.acoes.read_text()
+    # o que foi baixado saiu do disco, e o marcador da tentativa também
+    assert not (cenario.storage / "usbupd").exists()
+    assert not (cenario.storage / ".usbupd-tried").exists()
+
+
+def test_ao_lado_sem_pasta_de_boot_nao_faz_nada(cenario):
+    """O marcador sem nutellaboot/boot/ é instalação desfeita pela metade: não
+    há onde gravar, e o boot segue com o que tem."""
+    cenario.storage.mkdir(parents=True)
+    r = roda(cenario, extra="NB_DISKBOOT=1")
+    assert "SAIU=0" in r.stdout, r.stdout
+    assert not cenario.acoes.exists()
+
+
+def test_regrava_a_particao_de_onde_o_conf_veio(cenario):
+    """Com o pendrive espetado numa máquina instalada no disco há duas NB3CFG:
+    a autoatualização grava a de onde o conf foi lido (NB_CFG_DEV), e não a
+    que o label ou o blkid acharem primeiro."""
+    disco = cenario.tmp / "dev-sda1"
+    disco.write_text("")
+    montados = cenario.tmp / "montados"
+    (cenario.fakebin / "mount").write_text(
+        f'#!/bin/sh\necho "$1" >> "{montados}"\nexit 0\n'
+    )
+    r = roda(cenario, extra=f'NB_CFG_DEV="{disco}"')
+    assert "REBOOT" in cenario.acoes.read_text(), r.stdout
+    assert montados.read_text().split() == [str(disco)]
+
+
+def test_disco_instalado_diz_disco_e_nao_pendrive(cenario):
+    """Instalado no disco inteiro, a NB3CFG está num disco interno: a tela fala
+    da partição de boot do disco, não de um pendrive."""
+    d = cenario.tmp / "sys" / "devices" / "ata1" / "block" / "sda"
+    (d / "sda1").mkdir(parents=True)
+    (d / "removable").write_text("0\n")
+    classe = cenario.tmp / "sys" / "class"
+    classe.mkdir(parents=True)
+    (classe / "sda1").symlink_to(d / "sda1")
+    disco = cenario.tmp / "sda1"
+    disco.write_text("")
+    r = roda(cenario, extra=f'NB_CFG_DEV="{disco}"', NB_SYS_CLASS_BLOCK=str(classe))
+    assert "boot partition of this computer's disk" in r.stdout, r.stdout
+    assert "this USB drive is out of date" not in r.stdout
+    assert "REBOOT" in cenario.acoes.read_text()

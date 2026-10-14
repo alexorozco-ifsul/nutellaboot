@@ -130,6 +130,17 @@ mount_persistenthome() {
 }
 
 createandactivateswap() {
+    # Instalado no disco inteiro (27-install.sh), o swap é a partição com o
+    # NOSSO rótulo. Nunca um swap sem rótulo ou de outro sistema: ele pode
+    # guardar a hibernação daquele sistema, e usá-lo a destruiria.
+    _swap=${NB_SWAP_BYLABEL:-/dev/disk/by-label/NB3SWAP}
+    if [ -e "$_swap" ]; then
+        _swap=$(readlink -f "$_swap")
+        if "${rootmnt?}/sbin/swapon" "$_swap" 2> /dev/null; then
+            nb_log "swap on the NB3SWAP partition ($_swap)"
+            return 0
+        fi
+    fi
     _swap=$STORAGEDIR/swapfile
     log_begin_msg "Preparing swap on disk"
     if [ ! -e "$_swap" ]; then
