@@ -320,7 +320,7 @@
   "usb_installer": "installer USB drive",
   "usb_installer_or": "so the machine boots without a USB drive",
   "usb_installer_help": "this room's drive with two more boot menu entries: install on the whole disk, or next to Windows (UEFI only)",
-  "usb_installer_warn": "Installing on the whole disk ERASES the machine's disk. The menu default is the normal boot: the installation only starts if someone picks it, and the screen shows the disk and counts down 30 s before erasing it.",
+  "usb_installer_warn": "Installing on the whole disk ERASES the machine's disk. The menu default is the normal boot: the installation only starts if someone picks it, and the screen shows the disk and what will be done and only goes on when someone types YES.",
   "usb_help": "Machines boot from a USB drive. Write the image once and use the same drive on every machine — it is released early in the boot.",
   "usb_howto": "Write the image to the drive and copy nutellaboot.conf into it (it is a plain FAT partition, readable anywhere).",
   "usb_kernel": "kernel and initrd",

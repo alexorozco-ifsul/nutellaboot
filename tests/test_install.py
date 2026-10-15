@@ -136,6 +136,9 @@ class Maquina:
         self.inst = tmp / "inst"
         self.acoes = tmp / "acoes"
         self.efilista = tmp / "efi-lista"
+        # o console de onde vem a resposta da pergunta
+        self.teclado = tmp / "teclado"
+        self.teclado.write_text("yes\n")
         for d in (self.bin, self.sys / "block", self.sys / "class", self.dev, self.conteudo,
                   self.blkid, self.efi / "efivars", self.servidor, self.respostas, self.run):
             d.mkdir(parents=True)
@@ -199,8 +202,8 @@ class Maquina:
             f"https://s/boot/v3/sala1/installfile/{imagem.name}\n"
         )
 
-    def roda(self, script: str, **env) -> subprocess.CompletedProcess:
-        e = {
+    def env(self, **env) -> dict:
+        return {
             "STUFF": str(STUFF),
             "FAKEBIN": str(self.bin),
             "BASEPATH": "/usr/bin:/bin",
@@ -222,17 +225,19 @@ class Maquina:
             "NB_INST_TMP": str(self.inst),
             "NB_INST_ESPMNT": str(self.tmp / "espmnt"),
             "NB_INST_IMGMNT": str(self.tmp / "imgmnt"),
-            "NB_INST_WAIT": "0",
+            "NB_INST_TTY": str(self.teclado),
             "NB_INST_FIM_WAIT": "0",
             "NB_INST_POLL": "0",
             "NB_RUN": str(self.run),
             **{k: str(v) for k, v in env.items()},
         }
+
+    def roda(self, script: str, **env) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["sh", "-c", HARNESS + "\n" + script],
             capture_output=True,
             text=True,
-            env=e,
+            env=self.env(**env),
             cwd=str(self.tmp),
             timeout=120,
         )
@@ -454,7 +459,9 @@ def test_sem_swap_a_ext4_vai_ate_o_fim(maq, tmp_path):
     assert "mkswap" not in maq.acoes_texto()
 
 
-def _instala_disco(maq, tmp_path, **env):
+def _cena_disco(maq, tmp_path):
+    """Um SSD com Windows, o pendrive USB de onde o boot veio e o servidor com a
+    imagem. Devolve o script do boot e o disco."""
     img = imagem_da_sede(tmp_path / "sala1-abc.img")
     maq.servir(img)
     disco = maq.disco("sda", 256 * MiB, arquivo=True, modelo="Samsung SSD 870",
@@ -465,19 +472,20 @@ def _instala_disco(maq, tmp_path, **env):
         "Boot0001* Windows Boot Manager\tHD(1,GPT,...)/\\EFI\\Microsoft\\Boot\\bootmgfw.efi\n"
         "Boot0003* Maratona Linux\tHD(1,MBR,0x1,0x800,0x1f800)/\\EFI\\BOOT\\BOOTX64.EFI\n"
     )
-    r = maq.roda(
-        f'NB_CFG_DEV="{pendrive}"; nb3install=disco; nb3swap=0; nb_install; echo NAO-VOLTA',
-        NB_MIN_FREE_KB="1024",
-        NB_INST_MARGEM="0",
-        **env,
-    )
+    script = f'NB_CFG_DEV="{pendrive}"; nb3install=disco; nb3swap=0; nb_install; echo NAO-VOLTA'
+    return script, disco
+
+
+def _instala_disco(maq, tmp_path, **env):
+    script, disco = _cena_disco(maq, tmp_path)
+    r = maq.roda(script, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0", **env)
     return r, disco
 
 
 def test_instala_no_disco_inteiro_de_ponta_a_ponta(maq, tmp_path):
     r, disco = _instala_disco(maq, tmp_path)
     assert "NAO-VOLTA" not in r.stdout, "terminou sem reiniciar"
-    assert "=== ERASING ===" in r.stdout and "Samsung SSD 870" in r.stdout and "Windows" in r.stdout
+    assert "=== ERASE? ===" in r.stdout and "Samsung SSD 870" in r.stdout and "Windows" in r.stdout
     assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
     assert [x["type"] for x in _particoes(disco)] == ["ef", "83"]
     acoes = maq.acoes_texto()
@@ -542,6 +550,133 @@ def test_empate_mostra_os_discos_e_nao_apaga(maq, tmp_path):
     assert "=== DISK? ===" in r.stdout and "nb3disk=" in r.stdout, r.stdout
     for d in (a, b):
         assert d.read_bytes() == b"\0" * d.stat().st_size
+
+
+# --- a pergunta ---
+
+
+def _zerado(disco: Path) -> bool:
+    return disco.read_bytes() == b"\0" * disco.stat().st_size
+
+
+def _pty():
+    import pty
+
+    mestre, escravo = pty.openpty()
+    return mestre, escravo, os.ttyname(escravo)
+
+
+def test_a_tela_diz_o_que_vai_ser_feito_e_onde(maq, tmp_path):
+    """A pergunta mostra o disco, o que há nele e o que fica no lugar, com a
+    mesma conta que a gravação usa."""
+    maq.teclado.write_text("no\n")
+    r, disco = _instala_disco(maq, tmp_path)
+    tela = r.stdout
+    assert "=== ERASE? ===" in tela, tela + r.stderr
+    assert "/dev/sda   SSD   256 MB   Samsung SSD 870" in tela
+    assert "sda1" in tela and "ntfs" in tela and "Windows" in tela
+    # 256 MiB de disco, imagem de 64 MiB e nb3swap=0
+    assert "boot 64 MB," in tela and "system 192 MB (ext4) and no swap." in tela
+    assert "'Maratona Linux', first in the order" in tela
+    assert "Type YES and press Enter to ERASE this disk and install" in tela
+
+
+def test_responder_no_nao_toca_em_nada(maq, tmp_path):
+    """NO cancela antes do download: o disco, o firmware e a RAM ficam como
+    estavam, e a máquina reinicia."""
+    maq.teclado.write_text("NO\n")
+    r, disco = _instala_disco(maq, tmp_path)
+    assert "=== STOPPED ===" in r.stdout and "the answer was NO" in r.stdout, r.stdout + r.stderr
+    assert "Nothing was changed on this computer" in r.stdout
+    assert "nb3disk=NAME" in r.stdout
+    assert "NAO-VOLTA" not in r.stdout
+    assert _zerado(disco)
+    acoes = maq.acoes_texto()
+    assert "efibootmgr" not in acoes and "losetup" not in acoes
+    assert not (maq.inst / "sala1-abc.img").exists(), "baixou antes do YES"
+    assert acoes.rstrip().endswith("REBOOT")
+
+
+@pytest.mark.parametrize("console", ["/dev/null", "/nao/existe"])
+def test_console_sem_resposta_cancela(maq, tmp_path, console):
+    """Fim da entrada (Ctrl-D) ou console que nem abre: cancela na hora, sem
+    laço e sem instalar."""
+    r, disco = _instala_disco(maq, tmp_path, NB_INST_TTY=console)
+    assert "=== STOPPED ===" in r.stdout and "read from the keyboard" in r.stdout, r.stdout + r.stderr
+    assert _zerado(disco)
+    assert maq.acoes_texto().rstrip().endswith("REBOOT")
+
+
+def test_resposta_que_nao_vale_pergunta_de_novo(maq, tmp_path):
+    """Linha vazia, "y" ou "sim" nem instalam nem cancelam: a tela volta com o
+    aviso. Só a palavra inteira instala, em qualquer caixa."""
+    maq.teclado.write_text("\ny\nsim\n  Yes  \n")
+    r, disco = _instala_disco(maq, tmp_path)
+    assert r.stdout.count("=== ERASE? ===") == 4, r.stdout + r.stderr
+    assert r.stdout.count("Only the whole word YES installs") == 3
+    assert "=== DONE ===" in r.stdout
+    assert not _zerado(disco)
+
+
+def test_sem_resposta_no_prazo_cancela(maq, tmp_path):
+    """O prazo é a saída desatendida da exceção à invariante 5: ninguém
+    respondeu, nada muda e a máquina reinicia."""
+    mestre, escravo, nome = _pty()
+    try:
+        r, disco = _instala_disco(maq, tmp_path, NB_INST_TTY=nome, NB_INST_ASK_WAIT="1")
+    finally:
+        os.close(mestre)
+        os.close(escravo)
+    assert "=== STOPPED ===" in r.stdout and "no answer in time" in r.stdout, r.stdout + r.stderr
+    assert _zerado(disco)
+
+
+def test_o_que_foi_digitado_antes_da_tela_nao_responde(maq, tmp_path):
+    """Um yes que já estava no buffer do console (digitado enquanto o boot
+    subia) é descartado: quem responde viu a tela."""
+    mestre, escravo, nome = _pty()
+    try:
+        os.write(mestre, b"yes\n")
+        r, disco = _instala_disco(maq, tmp_path, NB_INST_TTY=nome, NB_INST_ASK_WAIT="2")
+    finally:
+        os.close(mestre)
+        os.close(escravo)
+    assert "=== STOPPED ===" in r.stdout and "no answer in time" in r.stdout, r.stdout + r.stderr
+    assert _zerado(disco)
+
+
+def test_yes_digitado_no_terminal_instala(maq, tmp_path):
+    """O caminho de verdade: um terminal, a tela aparece, e só então alguém
+    digita yes."""
+    import select
+    import time
+
+    script, disco = _cena_disco(maq, tmp_path)
+    mestre, escravo, nome = _pty()
+    try:
+        proc = subprocess.Popen(
+            ["sh", "-c", HARNESS + "\n" + script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=maq.env(NB_INST_TTY=nome, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0"),
+            cwd=str(maq.tmp),
+        )
+        saida = b""
+        prazo = time.monotonic() + 60
+        while b"Type YES" not in saida:
+            assert time.monotonic() < prazo, saida
+            if select.select([proc.stdout], [], [], 1)[0]:
+                pedaco = os.read(proc.stdout.fileno(), 65536)
+                assert pedaco, saida
+                saida += pedaco
+        os.write(mestre, b"yes\n")
+        resto, _ = proc.communicate(timeout=120)
+        saida = (saida + resto).decode()
+    finally:
+        os.close(mestre)
+        os.close(escravo)
+    assert "=== DONE ===" in saida, saida
+    assert [x["type"] for x in _particoes(disco)] == ["ef", "83"]
 
 
 # --- ao lado do Windows ---
@@ -675,6 +810,37 @@ def test_ao_lado_com_a_esp_cheia_nao_muda_nada(maq, tmp_path):
     assert not (sistema / "nutellaboot").exists()
 
 
+def test_ao_lado_a_tela_mostra_onde_e_no_nao_muda_nada(maq, tmp_path):
+    esp, sistema = _maquina_com_windows(maq, tmp_path)
+    maq.teclado.write_text("no\n")
+    r = maq.roda(LADO.format(pendrive=_pendrive_usb(maq), tmp=maq.tmp, dev=maq.dev))
+    tela = r.stdout
+    assert "=== CONFIRM ===" in tela and "Nothing is erased" in tela, tela + r.stderr
+    assert "EFI system partition (EFI/nutellaboot)" in tela
+    assert "sda1" in tela and "vfat" in tela and "sda2" in tela and "ntfs" in tela
+    assert "(disk /dev/sda: Disco de Teste, 500 GB)" in tela
+    assert "Windows stays" in tela and "already there" not in tela
+    assert "Type YES and press Enter to install" in tela
+    assert "=== STOPPED ===" in tela and "the answer was NO" in tela
+    assert "nb3disk" not in tela
+    # nada gravado, nada baixado, e o disco do sistema desmontado antes do reboot
+    assert not (esp / "EFI" / "nutellaboot").exists()
+    assert not (sistema / "nutellaboot").exists()
+    assert not (maq.inst / "sala1-abc.img").exists()
+    acoes = maq.acoes_texto()
+    assert "efibootmgr" not in acoes
+    assert f"umount {maq.tmp}/blockroot" in acoes
+    assert acoes.rstrip().endswith("REBOOT")
+
+
+def test_ao_lado_a_tela_avisa_que_substitui_a_instalacao_anterior(maq, tmp_path):
+    esp, sistema = _maquina_com_windows(maq, tmp_path)
+    (esp / "EFI" / "nutellaboot").mkdir()
+    maq.teclado.write_text("no\n")
+    r = maq.roda(LADO.format(pendrive=_pendrive_usb(maq), tmp=maq.tmp, dev=maq.dev))
+    assert "The Maratona boot loader already there is replaced" in r.stdout, r.stdout
+
+
 def test_desinstalar_leva_so_o_que_e_nosso(maq, tmp_path):
     esp, sistema = _maquina_com_windows(maq, tmp_path)
     (esp / "EFI" / "nutellaboot").mkdir()
@@ -734,17 +900,62 @@ def test_de_onde_veio_o_boot(maq, prep, esperado):
 MAX_LINHAS = 25
 
 
-def test_a_contagem_cabe_na_tela(maq):
+def _sem_cor(texto: str) -> list[str]:
+    import re
+
+    return [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", l) for l in texto.splitlines()]
+
+
+def test_a_pergunta_do_disco_cabe_na_tela(maq):
+    """O pior caso: muitas partições, disco maior que o MBR alcança e o aviso
+    de resposta errada. A linha do prompt fica sem quebra e conta."""
     partes = [(f"sda{i}", 10 * 1024 * MiB, {"TYPE": "ntfs", "LABEL": f"Dados {i}"}) for i in range(1, 9)]
-    maq.disco("sda", 500 * 1024 * MiB, partes=partes)
-    (maq.tmp / "lista").write_text(f"sda ssd {500 * 1024 * MiB} Samsung SSD 870 EVO 500GB\n")
-    r = maq.roda("nb_inst_contagem sda lista", NB_UI_PLAIN="0", NB_INST_WAIT="2")
-    linhas = r.stdout.replace("\r", "\n").splitlines()
-    # a contagem reescreve a mesma linha (\r): conta uma vez
-    altura = len(r.stdout.splitlines())
-    assert altura <= MAX_LINHAS, f"a contagem usa {altura} linhas"
-    assert any("Erasing in" in l for l in linhas)
-    assert "... and more" in r.stdout
+    tb3 = 3 * 1024 * 1024 * MiB
+    maq.disco("sda", tb3, partes=partes)
+    (maq.tmp / "lista").write_text(f"sda hd {tb3} Western Digital WD Blue SN570 4TB NVMe\n")
+    r = maq.roda(f"nb_inst_tela_disco 1 sda lista {401 * MiB} {4 * 1024 * MiB}", NB_UI_PLAIN="0")
+    linhas = _sem_cor(r.stdout)
+    assert len(linhas) <= MAX_LINHAS, f"a pergunta usa {len(linhas)} linhas"
+    assert max(len(l) for l in linhas) <= 80, max(linhas, key=len)
+    assert "... and more" in r.stdout and "first 2 TB" in r.stdout
+    assert "Only the whole word YES installs" in r.stdout
+
+
+def test_a_pergunta_ao_lado_cabe_na_tela(maq):
+    """O pior caso: a ESP e o sistema em discos diferentes, rótulo comprido, a
+    instalação anterior e o aviso de resposta errada."""
+    maq.disco("sda", 256 * 1024 * MiB, modelo="Samsung SSD 970 EVO Plus 250GB", partes=[
+        ("sda1", 100 * MiB, {"TYPE": "vfat", "LABEL": "SYSTEM"})])
+    maq.disco("sdc", 1024 * 1024 * MiB, ssd=False, modelo="Western Digital WD10EZEX-08WN4A0", partes=[
+        ("sdc1", 16 * MiB, {}),
+        ("sdc2", 900 * 1024 * MiB, {"TYPE": "ntfs", "LABEL": "Um rotulo de NTFS bem comprido mesmo"})])
+    r = maq.roda(
+        "NB_INST_ESPLIVRE=71234 NB_INST_ESPWIN=1 NB_INST_ESPVELHO=1; "
+        f'nb_inst_tela_lado 1 sda1 "{maq.dev}/sdc2" 123456789',
+        NB_UI_PLAIN="0",
+    )
+    linhas = _sem_cor(r.stdout)
+    assert len(linhas) <= MAX_LINHAS, f"a pergunta usa {len(linhas)} linhas"
+    assert max(len(l) for l in linhas) <= 80, max(linhas, key=len)
+    assert "/dev/sda:" in r.stdout and "/dev/sdc:" in r.stdout
+    assert "already there is replaced" in r.stdout and "Only the whole word" in r.stdout
+
+
+def test_a_desistencia_cabe_na_tela_e_lista_os_discos(maq):
+    """Quem disse NO no modo disco muitas vezes quer outro disco: a tela lista
+    os nomes que o nb3disk= aceita."""
+    maq.inst.mkdir()
+    (maq.inst / "discos").write_text(
+        "".join(f"sd{c} hd {500 * 1024 * MiB} Disco {c}\n" for c in "abcdefgh")
+    )
+    r = maq.roda("NB_INST_MOTIVO=no; nb_inst_cancelada disco", NB_UI_PLAIN="0")
+    # o aviso no log sai antes da tela, e a tela limpa o console: conta o que
+    # fica visível
+    linhas = _sem_cor(r.stdout.split("\x1b[2J")[-1])
+    assert len(linhas) <= MAX_LINHAS, f"a desistência usa {len(linhas)} linhas"
+    assert max(len(l) for l in linhas) <= 80, max(linhas, key=len)
+    assert "sda" in r.stdout and "nb3disk=NAME" in r.stdout and "... and more" in r.stdout
+    assert "REBOOT" in maq.acoes_texto()
 
 
 def test_a_recusa_de_disco_cabe_na_tela(maq):

@@ -246,9 +246,10 @@ menuentry "Maratona Linux\$nb3_sede — modo live (sem home persistente)" {
 EOF
 
 # O pendrive de instalação é o da sede com duas entradas a mais, e NENHUMA é o
-# padrão: o técnico escolhe no menu, e o instalador ainda mostra o disco e
-# conta 30 s antes de apagar. Um pendrive errado não apaga nada sozinho. Ao
-# lado do Windows só existe no UEFI: no BIOS seria reescrever o MBR dele.
+# padrão: o técnico escolhe no menu, e o instalador ainda mostra o disco e o
+# que vai ser feito e só segue com o YES digitado. Um pendrive errado não apaga
+# nada sozinho. Ao lado do Windows só existe no UEFI: no BIOS seria reescrever
+# o MBR dele.
 if [ "$INSTALLER" = 1 ]; then
     cat >> "$WORK/grub.cfg" << EOF
 menuentry "INSTALAR no disco inteiro — APAGA O DISCO (install on the whole disk, ERASES IT)" {

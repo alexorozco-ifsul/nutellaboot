@@ -375,11 +375,16 @@ def test_no_interactive_read_in_client_scripts():
     """Regressão do nb2: `read` esperando teclado trava máquina desatendida —
     o boot da sala inteira parava num "Press ENTER to continue".
 
-    Exceção única e deliberada: o hold do modo seed (50-seed.sh). É opt-in da
-    sede (SEEDIMAGE), o `read` tem timeout de 1 s, e a saída desatendida é
-    garantida pela liberação remota no configureitor — segurar o boot ali é a
-    função, não um esquecimento. Qualquer outro `read` de teclado (sem
-    redirecionamento, ou lendo de /dev/console ou /dev/tty) continua proibido,
+    Duas exceções deliberadas, as duas com prazo e saída desatendida:
+      * o hold do modo seed (50-seed.sh). É opt-in da sede (SEEDIMAGE), o
+        `read` tem timeout de 1 s, e a liberação remota no configureitor
+        garante a saída — segurar o boot ali é a função, não um esquecimento;
+      * a pergunta do instalador (27-install.sh, `nb_inst_le`). Só existe com
+        `nb3install=`, que só uma entrada fora do padrão do menu do pendrive
+        de instalação põe, e o prazo (`NB_INST_ASK_WAIT`) cancela e reinicia
+        sem tocar em nada.
+    Qualquer outro `read` de teclado (sem redirecionamento, ou lendo de
+    /dev/console, /dev/tty ou de uma variável *TTY) continua proibido,
     inclusive atrás de `if`. (`while read` fica de fora: é o padrão
     estabelecido de consumir pipe/arquivo, com o redirecionamento no `done`.)"""
     offenders = []
@@ -390,12 +395,39 @@ def test_no_interactive_read_in_client_scripts():
                 continue
             if not re.match(r"(?:if\s+|elif\s+)?read(?:\s|$)", s):
                 continue
-            if "<" in s and not re.search(r"<\s*/dev/(console|tty)", s):
+            teclado = r"<\s*(?:/dev/(?:console|tty)|\"?\$\{?\w*TTY)"
+            if "<" in s and not re.search(teclado, s):
                 continue  # lê de arquivo/pipe, não de teclado
             if path.name == "50-seed.sh" and re.search(r"read\s+-r\s+-t\s+\d", s):
-                continue  # a exceção documentada acima
+                continue  # o hold do seed
+            if path.name == "27-install.sh" and re.search(r'read\s+-r\s+-t\s+"\$', s):
+                continue  # a pergunta do instalador
             offenders.append(f"{path.name}:{n}: {s}")
     assert offenders == [], "read interativo: " + "; ".join(offenders)
+
+
+def test_o_instalador_le_o_teclado_num_lugar_so_e_com_prazo():
+    """A exceção do instalador é UMA leitura, com prazo, do console: mais um
+    `read` no arquivo seria uma pergunta sem a saída desatendida."""
+    texto = (REPO / "client" / "stuff" / "27-install.sh").read_text()
+    linhas = [l for l in texto.splitlines() if not l.lstrip().startswith("#")]
+    codigo = [l.strip() for l in linhas]
+    leituras = []
+    for i, l in enumerate(linhas):
+        s = l.strip()
+        if not re.match(r"(?:if\s+|elif\s+|while\s+)?read(?:\s|$)", s):
+            continue
+        if s.startswith("while"):
+            # o `done` do mesmo nível diz de onde o laço lê
+            recuo = len(l) - len(l.lstrip())
+            done = next(x for x in linhas[i + 1:] if x.strip().startswith("done")
+                        and len(x) - len(x.lstrip()) == recuo)
+            if re.search(r"<\s*\"?\$[1-9]\b", done) and "TTY" not in done:
+                continue  # a lista de discos, de um arquivo
+        leituras.append(s)
+    assert leituras == ['read -r -t "$1" NB_INST_LIDO'], leituras
+    assert "NB_INST_TTY=${NB_INST_TTY:-/dev/console}" in codigo
+    assert 'nb_inst_responde "$@" < "$NB_INST_TTY"' in codigo
 
 
 def test_no_disabled_certificate_check():

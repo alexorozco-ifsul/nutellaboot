@@ -414,20 +414,24 @@ NB3_ADMIN_KEY=nb3a_... tools/nb3-genusb --installer \
 **Na máquina:**
 
 1. Ligue com o pendrive e escolha a entrada no menu.
-2. A máquina sobe a rede e baixa do servidor a imagem do pendrive da sede, a
+2. A máquina sobe a rede e pede ao servidor a imagem do pendrive da sede, a
    mesma do console. Se ela ainda não existe ou está velha, o servidor a gera
    na hora, e a tela espera.
 3. **Disco inteiro:**
-   - a tela mostra o disco escolhido (modelo, tamanho, o que há nele) e conta
-     30 s. **Para cancelar, desligue a máquina.** Nenhuma tecla é pedida;
+   - a tela mostra o disco escolhido (modelo, tamanho, o que há nele) e o que
+     fica no lugar. **Digite `YES` e Enter para instalar.** `NO` cancela, e a
+     tela seguinte lista os discos. Sem resposta em 10 min, nada muda e a
+     máquina reinicia. O download vem depois do `YES`: responda e siga para a
+     próxima máquina;
    - o disco escolhido é interno: SSD/NVMe antes de HD. Nunca é USB,
      removível, nem o pendrive de onde a máquina bootou;
    - com dois discos do mesmo tipo, nada é apagado: a tela lista os dois. Para
      escolher, aperte `e` no menu e acrescente `nb3disk=sda` (o nome da lista)
      ao fim da linha `linux`. `nb3swap=8` muda o swap de 4 para 8 GB, e
      `nb3swap=0` tira o swap.
-4. **Ao lado do Windows:** o sistema vai para o espaço livre que o boot de
-   sempre usaria (30 GB numa NTFS ou ext4). As restrições de sempre valem: sem
+4. **Ao lado do Windows:** a tela mostra a partição EFI e a partição do
+   sistema, e pede o mesmo `YES`. O sistema vai para o espaço livre que o boot
+   de sempre usaria (30 GB numa NTFS ou ext4). As restrições de sempre valem: sem
    Fast Startup, sem BitLocker nessa partição.
 5. A máquina mostra `DONE` e reinicia. **Tire o pendrive.** O primeiro boot
    pelo disco baixa o sistema, como o primeiro boot de um pendrive.

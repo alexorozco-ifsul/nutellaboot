@@ -287,9 +287,14 @@ fim - 4 GB     p3  swap "NB3SWAP"
    antes de HD. Nunca escolhe disco USB, removível ou aquele de onde o boot
    veio. Com dois do mesmo tipo, mostra a lista e não apaga nada; o técnico
    aperta `e` no menu e acrescenta `nb3disk=NOME` à linha do kernel.
-2. **Contagem.** Uma tela mostra o modelo, o tamanho e o que existe no disco,
-   e conta 30 s. Desligar a máquina cancela. Nenhuma tecla é pedida
-   (invariante 5).
+2. **Confirmação.** Uma tela mostra o disco (modelo, tamanho, o que existe
+   nele) e o que fica no lugar: os tamanhos da partição de boot, do sistema e
+   do swap, e a entrada do firmware. Só a palavra YES, digitada, instala. NO
+   cancela, e a tela seguinte lista os discos para o `nb3disk=`. Sem resposta
+   em 10 min (`NB_INST_ASK_WAIT`), nada muda e a máquina reinicia: é a segunda
+   exceção da invariante 5. A pergunta vem antes do download. Até ali o
+   servidor só disse o tamanho da imagem, e o técnico responde e segue para a
+   próxima máquina.
 3. **Gravação.** A imagem vai para o começo do disco com `dd`, e o GPT
    reserva que o Windows deixou no fim é apagado. Depois, o instalador:
    - sorteia de novo a assinatura do MBR e o número de série da FAT (nas
@@ -314,6 +319,9 @@ instalação aos primeiros 2 TiB do disco.
 
 - **Partições:** nenhuma muda. O sistema usa a partição que o boot de sempre
   escolheria, a NTFS ou ext4 com 30 GB livres.
+- **Confirmação:** a tela mostra a ESP e a partição do sistema (o disco, o
+  tamanho e o espaço livre de cada uma) e o que vai para cada uma. Só o YES
+  digitado instala, como no disco inteiro, e antes do download.
 - **Na ESP**, em `\EFI\nutellaboot\`, ficam o GRUB, o `grub.cfg` e os
   arquivos que o GRUB entrega ao initrd. A ESP não tem letra no Windows,
   então a chave de boot não fica em `C:\`.

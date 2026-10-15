@@ -32,10 +32,13 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
 
 5. **Nada de `read` interativo no caminho de boot.** Máquina de prova boota
    sozinha; um prompt esperando ENTER trava a sala inteira. Há um teste que
-   falha se aparecer (`tests/test_bootstrap_shell.py`). Exceção única e
-   sancionada: o hold do modo seed (`50-seed.sh`) — opt-in da sede, `read`
-   com timeout de 1 s e saída desatendida garantida pela liberação remota no
-   configureitor.
+   falha se aparecer (`tests/test_bootstrap_shell.py`). Duas exceções
+   sancionadas, as duas com prazo e saída desatendida: o hold do modo seed
+   (`50-seed.sh`) — opt-in da sede, `read` com timeout de 1 s e liberação
+   remota no configureitor — e a pergunta do instalador (`27-install.sh`,
+   `nb_inst_le`) — só com `nb3install=`, que só uma entrada fora do padrão do
+   menu do pendrive de instalação põe, e sem resposta em 10 min nada muda e a
+   máquina reinicia.
 
 6. **Certificado sempre verificado.** Nada de `--check-certificate=false`. A
    única exceção é `GET /boot/v3/time`, que existe justamente para acertar o
@@ -209,7 +212,8 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     tudo que a produção precisa é ARQUIVO versionado (`deploy/`, `systemd/`) e
     não instrução em comentário. O procedimento está em `docs/operations.md`.
 
-21. **O instalador apaga discos, e por isso só com prova e sem pergunta.**
+21. **O instalador apaga discos, e por isso só com prova e com o YES de quem
+    está na frente.**
     `client/stuff/27-install.sh` (`nb3install=disco|lado`, posto pelo menu do
     pendrive de instalação, `nb3-genusb --installer`) é da mesma classe do
     `25-usbupdate.sh`. As regras:
@@ -221,9 +225,14 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     - empate entre discos não se decide: a tela lista, e nada é apagado;
     - a imagem é baixada para a RAM e conferida pelo md5 ANTES de tocar no
       disco;
-    - nenhuma tecla (invariante 5). A confirmação é a escolha no menu, e a
-      tela conta 30 s; `mke2fs` sempre com `-F` e a entrada vazia, porque
-      diante de um NTFS velho ele pergunta;
+    - duas confirmações: a escolha no menu e o YES digitado na tela que
+      mostra o disco e o que vai ser feito. A pergunta vem ANTES do download
+      (o técnico responde e segue para a próxima máquina) e é a segunda
+      exceção da invariante 5: uma leitura só (`nb_inst_le`), com prazo. NO,
+      fim da entrada e prazo cancelam sem tocar em nada, e o que estava no
+      buffer do console antes da tela é descartado;
+    - `mke2fs` sempre com `-F` e a entrada vazia, porque diante de um NTFS
+      velho ele pergunta;
     - o disco gravado ganha assinatura de MBR e número de série de FAT novos
       (nas duas cópias do setor de boot), ou a entrada do firmware e o
       `nb3cfg=` podem apontar para o pendrive;
@@ -278,7 +287,7 @@ o primeiro. Rota nova de console usa `require_console` + as funções de
 ```bash
 tools/nb3-init                     # instalação nova: emite e IMPRIME a chave
 tools/nb3-dev                      # servidor em 127.0.0.1:8890
-.venv/bin/python -m pytest -q      # 1374 testes, ~4 min
+.venv/bin/python -m pytest -q      # 1387 testes, ~4 min
 tools/nb3-seed-testdata            # dados de teste (não é instalação)
 tools/nb3-layer-worker --check     # confere as ferramentas rootless
 ```

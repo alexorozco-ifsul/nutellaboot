@@ -30,10 +30,13 @@
 #     rig de VM o "pendrive" é um disco IDE comum, e numa máquina real pode ser
 #     um SSD externo que se diz fixo: por isso o disco do boot sai pelo nome;
 #   * tudo é baixado e conferido pelo md5 ANTES de tocar no disco;
-#   * nenhuma pergunta (invariante 5). A confirmação é a escolha no menu do
-#     GRUB, e a tela mostra o disco e conta 30 s: desligar cancela. `mkfs`
-#     sempre forçado e com a entrada vazia, porque diante de um NTFS velho o
-#     mke2fs PERGUNTA, e a máquina ficaria parada;
+#   * duas confirmações: a entrada do menu do GRUB e o YES digitado na tela
+#     que mostra o que vai ser feito e onde (nb_inst_pergunta). É a segunda
+#     exceção da invariante 5: sem resposta no prazo, nada muda e a máquina
+#     reinicia. A pergunta vem antes do download, para o técnico responder e
+#     seguir para a próxima máquina. `mkfs` sempre forçado e com a entrada
+#     vazia, porque diante de um NTFS velho o mke2fs PERGUNTA, e a máquina
+#     ficaria parada;
 #   * terminou, reinicia: o primeiro boot pelo disco já confere a instalação.
 
 NB_INST_SYS_BLOCK=${NB_INST_SYS_BLOCK:-/sys/block}
@@ -48,6 +51,8 @@ NB_INST_IMGMNT=${NB_INST_IMGMNT:-/nb3img}
 # o rótulo da entrada do firmware: é por ele que a instalação seguinte e a
 # desinstalação acham as entradas antigas
 NB_INST_LABEL=${NB_INST_LABEL:-Maratona Linux}
+# de onde vem a resposta da pergunta (os testes trocam por um arquivo)
+NB_INST_TTY=${NB_INST_TTY:-/dev/console}
 
 nb_install() {
     case "${nb3install:-}" in
@@ -62,7 +67,7 @@ nb_install() {
     nb_phase "INSTALL - putting the boot on this computer's disk"
     modprobe loop 2> /dev/null
     nb_inst_prereq "$nb3install"
-    nb_inst_baixa
+    nb_inst_consulta
     case "$nb3install" in
         disco) nb_inst_disco ;;
         lado) nb_inst_lado ;;
@@ -159,24 +164,26 @@ nb_inst_ram() {
 # pronta (primeira vez, ou gerada antes do instalador existir): o servidor
 # responde WAIT, começa a gerá-la, e aqui se pergunta de novo. FAIL é geração
 # que falhou no servidor: parar com a causa vale mais que esperar 15 minutos.
-nb_inst_baixa() {
-    _iba_n=0
-    _iba_mudo=0
+# Aqui só se pergunta: o tamanho basta para escolher o disco e montar a tela,
+# e o download fica para depois do YES (nb_inst_baixa).
+nb_inst_consulta() {
+    _ics_n=0
+    _ics_mudo=0
     while :; do
-        _iba_r=$(nb_get "$NB_SERVER/boot/v3/$IMAGEROOT/install" 2> /dev/null)
-        _iba_linha=$(printf '%s\n' "$_iba_r" | sed -n 's/^IMAGE //p' | sed -n 1p)
-        [ -n "$_iba_linha" ] && break
-        _iba_erro=$(printf '%s\n' "$_iba_r" | sed -n 's/^FAIL //p' | sed -n 1p)
-        [ -n "$_iba_erro" ] && nb_inst_falhou "$_iba_erro"
-        _iba_espera=$(printf '%s\n' "$_iba_r" | sed -n 's/^WAIT //p' | sed -n 1p)
-        if [ -n "$_iba_espera" ]; then
-            _iba_n=$((_iba_n + 1))
-            [ "$_iba_n" -gt "${NB_INST_POLL_MAX:-90}" ] &&
-                nb_inst_falhou "the server did not finish preparing the files ($_iba_espera)"
-            nb_log "the server is preparing the installer files: $_iba_espera"
+        _ics_r=$(nb_get "$NB_SERVER/boot/v3/$IMAGEROOT/install" 2> /dev/null)
+        _ics_linha=$(printf '%s\n' "$_ics_r" | sed -n 's/^IMAGE //p' | sed -n 1p)
+        [ -n "$_ics_linha" ] && break
+        _ics_erro=$(printf '%s\n' "$_ics_r" | sed -n 's/^FAIL //p' | sed -n 1p)
+        [ -n "$_ics_erro" ] && nb_inst_falhou "$_ics_erro"
+        _ics_espera=$(printf '%s\n' "$_ics_r" | sed -n 's/^WAIT //p' | sed -n 1p)
+        if [ -n "$_ics_espera" ]; then
+            _ics_n=$((_ics_n + 1))
+            [ "$_ics_n" -gt "${NB_INST_POLL_MAX:-90}" ] &&
+                nb_inst_falhou "the server did not finish preparing the files ($_ics_espera)"
+            nb_log "the server is preparing the installer files: $_ics_espera"
         else
-            _iba_mudo=$((_iba_mudo + 1))
-            [ "$_iba_mudo" -ge 3 ] &&
+            _ics_mudo=$((_ics_mudo + 1))
+            [ "$_ics_mudo" -ge 3 ] &&
                 nb_inst_falhou "the server did not answer /boot/v3/$IMAGEROOT/install"
             nb_warn "the server did not answer the installer request - trying again"
         fi
@@ -184,23 +191,31 @@ nb_inst_baixa() {
     done
     # IMAGE <md5> <bytes> <arquivo> <url> [<url>...]
     # shellcheck disable=SC2086
-    set -- $_iba_linha
-    _iba_md5=$1
-    _iba_tam=$2
-    _iba_arq=$3
+    set -- $_ics_linha
+    NB_INST_MD5=$1
+    NB_INST_TAM=$2
+    NB_INST_ARQ=$3
     shift 3
-    case "$_iba_arq" in "" | .* | */*) nb_inst_falhou "the server sent a bad file name" ;; esac
-    nb_inst_ram "$_iba_tam"
+    NB_INST_URLS=$*
+    case "$NB_INST_ARQ" in "" | .* | */*) nb_inst_falhou "the server sent a bad file name" ;; esac
+    # o tamanho entra em conta antes do download: texto aqui seria erro de shell
+    case "$NB_INST_TAM" in "" | *[!0-9]*) nb_inst_falhou "the server sent a bad file size" ;; esac
+    nb_inst_ram "$NB_INST_TAM"
+}
+
+# Só depois do YES: a imagem vai para a RAM e é conferida pelo md5.
+nb_inst_baixa() {
     mkdir -p "$NB_INST_TMP"
     NB_DL_PROGRESS=1
-    NB_DL_LABEL="installer: $_iba_arq"
-    nb_download "$NB_INST_TMP/$_iba_arq" 4 "$@" ||
+    NB_DL_LABEL="installer: $NB_INST_ARQ"
+    # shellcheck disable=SC2086
+    nb_download "$NB_INST_TMP/$NB_INST_ARQ" 4 $NB_INST_URLS ||
         nb_inst_falhou "the installer files could not be downloaded"
     NB_DL_PROGRESS=0
     NB_DL_LABEL=
-    nutella_md5sum "$_iba_md5" "$NB_INST_TMP/$_iba_arq" ||
+    nutella_md5sum "$NB_INST_MD5" "$NB_INST_TMP/$NB_INST_ARQ" ||
         nb_inst_falhou "the downloaded file is damaged (MD5 does not match)"
-    NB_INST_IMG=$NB_INST_TMP/$_iba_arq
+    NB_INST_IMG=$NB_INST_TMP/$NB_INST_ARQ
 }
 
 # O início da p1 da imagem, em setores (o nb3-genusb a põe em 1 MiB).
@@ -329,13 +344,14 @@ nb_inst_sem_disco_screen() {
     panic=60 panic "no disk for the installation"
 }
 
-# O que existe no disco hoje, para a tela antes de apagar.
+# O que existe no disco hoje, para a tela antes de apagar. Quatro partições e
+# "and more": a tela da pergunta é a mais alta do instalador.
 nb_inst_conteudo() {
     _ico_n=0
     for _ico_p in "$NB_INST_SYS_BLOCK/$1/$1"*; do
         [ -e "$_ico_p/partition" ] || continue
         _ico_n=$((_ico_n + 1))
-        if [ "$_ico_n" -gt 5 ]; then
+        if [ "$_ico_n" -gt 4 ]; then
             nb_ui_dim "    ... and more"
             break
         fi
@@ -348,28 +364,156 @@ nb_inst_conteudo() {
     [ "$_ico_n" = 0 ] && nb_ui_dim "    (no partitions)"
 }
 
-# A última chance. Nada de tecla (invariante 5): quem escolheu a entrada no
-# menu já confirmou, e quem errou desliga a máquina.
-nb_inst_contagem() {
-    _ict_s=$(awk -v d="$1" '$1 == d {print $3}' "$2")
-    _ict_m=$(awk -v d="$1" '$1 == d {$1 = $2 = $3 = ""; sub(/^ +/, ""); print}' "$2")
-    nb_screen "ERASING" \
-        "!EVERYTHING ON THIS DISK WILL BE ERASED:" \
-        "" \
-        "    /dev/$1   $_ict_m   $(nb_inst_tamanho "${_ict_s:-0}")" \
-        "" \
-        "!On it now:"
-    nb_inst_conteudo "$1"
-    printf '\n'
-    nb_ui_text "To cancel: TURN THE COMPUTER OFF now."
-    nb_ui_dim "Maratona Linux takes the whole disk and starts without the USB drive."
-    _ict_n=${NB_INST_WAIT:-30}
-    while [ "$_ict_n" -gt 0 ]; do
-        printf '\r  %sErasing in %2d seconds...%s ' "$NB_C_TXT" "$_ict_n" "$NB_C_OFF"
-        sleep 1
-        _ict_n=$((_ict_n - 1))
+# --- a pergunta ---
+
+# A segunda confirmação (a primeira é a escolha no menu do GRUB): a tela diz
+# o que vai ser feito e onde, e só a palavra YES, inteira e em qualquer caixa,
+# instala. NO cancela; linha vazia ou outra coisa redesenha a tela e pergunta
+# de novo. É a segunda exceção da invariante 5, ao lado do hold do seed: só
+# existe com nb3install=, que só uma entrada fora do padrão do menu do
+# pendrive de instalação põe, e o prazo é um só (NB_INST_ASK_WAIT): sem
+# resposta, nada muda e a máquina reinicia. Volta 0 no YES; senão,
+# NB_INST_MOTIVO diz por quê. Um console que não abre também cancela.
+# $1 a função que desenha a tela; o resto vai para ela, depois da marca de erro
+nb_inst_pergunta() {
+    NB_INST_MOTIVO=teclado
+    nb_inst_responde "$@" < "$NB_INST_TTY"
+}
+
+nb_inst_responde() {
+    _irs_tela=$1
+    shift
+    # o que foi digitado antes de a tela aparecer (um ENTER a mais enquanto o
+    # boot subia a rede, por exemplo) não responde por ninguém
+    _irs_n=0
+    if [ -t 0 ]; then
+        while [ "$_irs_n" -lt 100 ] && nb_inst_le 1; do
+            _irs_n=$((_irs_n + 1))
+        done
+    fi
+    _irs_fim=$(($(date +%s) + ${NB_INST_ASK_WAIT:-600}))
+    _irs_erro=
+    while :; do
+        "$_irs_tela" "$_irs_erro" "$@"
+        _irs_resta=$((_irs_fim - $(date +%s)))
+        # o read devolve erro no prazo e no fim da entrada (Ctrl-D, console
+        # sem teclado), e o código difere entre shells: decide o relógio
+        if [ "$_irs_resta" -le 0 ] || ! nb_inst_le "$_irs_resta"; then
+            printf '\n'
+            if [ "$(date +%s)" -ge "$_irs_fim" ]; then
+                NB_INST_MOTIVO=prazo
+            else
+                NB_INST_MOTIVO=teclado
+            fi
+            return 1
+        fi
+        case "$NB_INST_LIDO" in
+            [Yy][Ee][Ss])
+                NB_INST_MOTIVO=
+                return 0
+                ;;
+            [Nn] | [Nn][Oo])
+                NB_INST_MOTIVO=no
+                return 1
+                ;;
+        esac
+        _irs_erro=1
     done
+}
+
+# A única leitura de teclado do instalador, e sempre com prazo (a guarda da
+# invariante 5 confere).
+nb_inst_le() {
+    NB_INST_LIDO=
+    read -r -t "$1" NB_INST_LIDO
+}
+
+# O pé das duas telas da pergunta. $1 = 1 depois de uma resposta que não
+# vale; $2 o que o YES faz.
+nb_inst_tela_pergunta() {
+    _itp_w=${NB_INST_ASK_WAIT:-600}
+    if [ "$_itp_w" -ge 120 ]; then
+        _itp_w="$((_itp_w / 60)) minutes"
+    else
+        _itp_w="$_itp_w seconds"
+    fi
     printf '\n'
+    nb_ui_text "Type YES and press Enter $2. NO cancels."
+    nb_ui_dim "No answer in $_itp_w: nothing changes and this computer restarts."
+    if [ "$1" = 1 ]; then
+        nb_ui_text "Only the whole word YES installs: type YES or NO."
+    fi
+    printf '  > '
+}
+
+# Não volta. Nada foi gravado: o disco, a ESP e o firmware só mudam depois do
+# YES. No modo disco a tela lista os discos, porque quem disse NO muitas vezes
+# quer outro, e o nb3disk= pede o nome dele.
+# $1 é o modo
+nb_inst_cancelada() {
+    case "${NB_INST_MOTIVO:-}" in
+        no) _ica_r="the answer was NO." ;;
+        prazo) _ica_r="there was no answer in time." ;;
+        *) _ica_r="no answer could be read from the keyboard." ;;
+    esac
+    nb_warn "installation cancelled: $_ica_r"
+    nb_screen "STOPPED" \
+        "!The installation was cancelled: $_ica_r" \
+        "Nothing was changed on this computer."
+    if [ "$1" = disco ] && [ -s "$NB_INST_TMP/discos" ]; then
+        printf '\n'
+        nb_ui_text "Disks on this computer:"
+        nb_inst_tabela_discos "$NB_INST_TMP/discos"
+    fi
+    printf '\n'
+    nb_ui_text "What to do:"
+    nb_ui_dim "  -> to install, start the installer again and answer YES"
+    if [ "$1" = disco ]; then
+        nb_ui_dim "  -> another disk: press 'e' in the boot menu and add nb3disk=NAME"
+        nb_ui_dim "     to the linux line, NAME from the list above"
+    else
+        nb_ui_dim "  -> or keep starting this computer from the USB drive"
+    fi
+    _ica_w=$(nb_screen_wait)
+    printf '\n'
+    nb_ui_text "This machine will restart in ${_ica_w} seconds."
+    sleep "$_ica_w"
+    reboot -f
+    panic=60 panic "installation cancelled"
+}
+
+# A tela da pergunta no modo disco: o disco, o que há nele e o que fica no
+# lugar. $1 marca de erro, $2 o disco, $3 a lista do nb_inst_discos, $4 os
+# setores da imagem, $5 os do swap.
+nb_inst_tela_disco() {
+    _ite_s=$(awk -v d="$2" '$1 == d {print $3}' "$3")
+    _ite_m=$(awk -v d="$2" '$1 == d {$1 = $2 = $3 = ""; sub(/^ +/, ""); print}' "$3")
+    case "$(awk -v d="$2" '$1 == d {print $2}' "$3")" in
+        ssd) _ite_q=SSD ;;
+        *) _ite_q=HD ;;
+    esac
+    nb_inst_divide "${_ite_s:-0}" "$4" "$5"
+    nb_screen "ERASE?" \
+        "!EVERYTHING ON THIS DISK WILL BE ERASED:" \
+        "$(printf '    /dev/%s   %s   %s   %s' "$2" "$_ite_q" "$(nb_inst_tamanho "${_ite_s:-0}")" "$_ite_m")"
+    nb_inst_conteudo "$2"
+    printf '\n'
+    if [ "$5" -gt 0 ]; then
+        _ite_sw="and swap $(nb_inst_tamanho "$5")"
+    else
+        _ite_sw="and no swap"
+    fi
+    nb_ui_text "Then Maratona Linux takes the disk: boot $(nb_inst_tamanho "$4"),"
+    nb_ui_text "system $(nb_inst_tamanho "$NB_INST_P2TAM") (ext4) $_ite_sw."
+    if [ "${_ite_s:-0}" -gt 4294967295 ]; then
+        nb_ui_dim "Only the first 2 TB of the disk are used (MBR limit)."
+    fi
+    if [ -d "$NB_INST_EFI" ]; then
+        nb_ui_dim "The firmware gets the boot entry '$NB_INST_LABEL', first in the order."
+    else
+        nb_ui_dim "This computer then starts from this disk, without the USB drive."
+    fi
+    nb_inst_tela_pergunta "$1" "to ERASE this disk and install"
 }
 
 # A imagem gravada é igual, byte a byte, à do pendrive de instalação: a mesma
@@ -399,6 +543,20 @@ nb_inst_swap() {
     return $_isw_rc
 }
 
+# Onde fica cada partição: a p2 no primeiro MiB depois da imagem, o swap no
+# fim. É a mesma conta para a tela da pergunta e para a gravação.
+# $1 setores do disco, $2 da imagem, $3 do swap
+nb_inst_divide() {
+    # o MBR só endereça 2 TiB: num disco maior, a instalação fica nos primeiros
+    _idv_fim=$1
+    [ "$_idv_fim" -gt 4294967295 ] && _idv_fim=4294967295
+    _idv_fim=$((_idv_fim / 2048 * 2048))
+    NB_INST_P2=$((($2 + 2047) / 2048 * 2048))
+    NB_INST_P3=$(((_idv_fim - $3) / 2048 * 2048))
+    NB_INST_P2TAM=$((NB_INST_P3 - NB_INST_P2))
+    [ "$NB_INST_P2TAM" -gt 0 ]
+}
+
 # Grava a imagem no começo do disco e acrescenta as partições de dados e de
 # swap. Formatar não depende de o kernel reler a tabela (com algo do sistema
 # antigo preso ao disco a releitura falha): a ext4 sai pelo deslocamento no
@@ -406,15 +564,10 @@ nb_inst_swap() {
 # $1 disco, $2 imagem, $3 início da p1, $4 swap (setores; 0 = sem swap)
 nb_inst_grava() {
     _igr_total=$(cat "$NB_INST_SYS_BLOCK/${1##*/}/size")
-    _igr_isect=$(($(stat -c %s "$2") / 512))
-    # o MBR só endereça 2 TiB: num disco maior, a instalação fica nos primeiros
-    _igr_fim=$_igr_total
-    [ "$_igr_fim" -gt 4294967295 ] && _igr_fim=4294967295
-    _igr_fim=$((_igr_fim / 2048 * 2048))
-    _igr_p2=$(((_igr_isect + 2047) / 2048 * 2048))
-    _igr_p3=$(((_igr_fim - $4) / 2048 * 2048))
-    _igr_p2tam=$((_igr_p3 - _igr_p2))
-    [ "$_igr_p2tam" -gt 0 ] || return 1
+    nb_inst_divide "$_igr_total" $(($(stat -c %s "$2") / 512)) "$4" || return 1
+    _igr_p2=$NB_INST_P2
+    _igr_p3=$NB_INST_P3
+    _igr_p2tam=$NB_INST_P2TAM
 
     log_begin_msg "Writing the boot partition to $1"
     dd if="$2" of="$1" bs=1048576 conv=notrunc 2> /dev/null || return 1
@@ -467,11 +620,8 @@ nb_inst_wifi_na_imagem() {
 }
 
 nb_inst_disco() {
-    _iad_p1=$(nb_inst_p1 "$NB_INST_IMG")
-    [ -n "$_iad_p1" ] || nb_inst_falhou "the installer file has no boot partition"
-    nb_inst_wifi_na_imagem "$NB_INST_IMG" "$_iad_p1" ||
-        nb_inst_falhou "could not put this site's wifi.conf on the disk"
-    _iad_isect=$(($(stat -c %s "$NB_INST_IMG") / 512))
+    # a imagem ainda não foi baixada: vale o tamanho que o servidor anunciou
+    _iad_isect=$((NB_INST_TAM / 512))
     # `nb3swap=` (GB, editado na linha do GRUB) muda o tamanho; 0 é sem swap
     _iad_gb=${nb3swap:-${NB_INST_SWAP_GB:-4}}
     case "$_iad_gb" in "" | *[!0-9]*) _iad_gb=4 ;; esac
@@ -479,10 +629,17 @@ nb_inst_disco() {
     # o mínimo: a imagem, o swap e os 30 GB livres que o boot exige
     # (30-storage.sh), mais 1 GB para o que a própria ext4 ocupa
     _iad_min=$((_iad_isect + _iad_swap + NB_MIN_FREE_KB * 2 + ${NB_INST_MARGEM:-2097152}))
+    mkdir -p "$NB_INST_TMP"
     nb_inst_discos "$_iad_min" > "$NB_INST_TMP/discos"
     _iad_d=$(nb_inst_escolhe "$NB_INST_TMP/discos") ||
         nb_inst_sem_disco_screen "$NB_INST_TMP/discos"
-    nb_inst_contagem "$_iad_d" "$NB_INST_TMP/discos"
+    nb_inst_pergunta nb_inst_tela_disco "$_iad_d" "$NB_INST_TMP/discos" "$_iad_isect" "$_iad_swap" ||
+        nb_inst_cancelada disco
+    nb_inst_baixa
+    _iad_p1=$(nb_inst_p1 "$NB_INST_IMG")
+    [ -n "$_iad_p1" ] || nb_inst_falhou "the installer file has no boot partition"
+    nb_inst_wifi_na_imagem "$NB_INST_IMG" "$_iad_p1" ||
+        nb_inst_falhou "could not put this site's wifi.conf on the disk"
     NB_INST_TOCOU=1
     nb_inst_grava "$NB_INST_DEV/$_iad_d" "$NB_INST_IMG" "$_iad_p1" "$_iad_swap" ||
         nb_inst_falhou "writing to /dev/$_iad_d failed"
@@ -707,6 +864,70 @@ nb_inst_sem_espaco_screen() {
         "  -> choose 'install on the whole disk' (it ERASES the disk)"
 }
 
+# A ESP escolhida, lida antes da pergunta e só para leitura: o espaço livre
+# (KB), se o Windows está nela e se já há um GRUB nosso.
+nb_inst_esp_info() {
+    NB_INST_ESPLIVRE=
+    NB_INST_ESPWIN=
+    NB_INST_ESPVELHO=
+    mkdir -p "$NB_INST_ESPMNT"
+    mount -t vfat -o ro "$NB_INST_DEV/$1" "$NB_INST_ESPMNT" 2> /dev/null || return 0
+    NB_INST_ESPLIVRE=$(df -Pk "$NB_INST_ESPMNT" 2> /dev/null | awk 'END {print $4}')
+    [ -f "$NB_INST_ESPMNT/EFI/Microsoft/Boot/bootmgfw.efi" ] && NB_INST_ESPWIN=1
+    [ -d "$NB_INST_ESPMNT/EFI/nutellaboot" ] && NB_INST_ESPVELHO=1
+    umount "$NB_INST_ESPMNT" 2> /dev/null
+    return 0
+}
+
+# "    sda2           ntfs     400 GB    120 GB free  Windows"
+# $1 a partição (nome ou caminho), $2 o livre em KB (vazio: não se sabe)
+nb_inst_linha_part() {
+    _ilp_b=${1##*/}
+    _ilp_t=$(blkid -o value -s TYPE "$NB_INST_DEV/$_ilp_b" 2> /dev/null)
+    _ilp_l=$(blkid -o value -s LABEL "$NB_INST_DEV/$_ilp_b" 2> /dev/null)
+    _ilp_s=$(cat "$NB_SYS_CLASS_BLOCK/$_ilp_b/size" 2> /dev/null)
+    case "$2" in
+        "" | *[!0-9]*) _ilp_f="? free" ;;
+        *) _ilp_f="$(nb_inst_tamanho $(($2 * 2))) free" ;;
+    esac
+    nb_ui_dim "$(printf '    %-14s %-6s %8s  %13s  %.16s' "$_ilp_b" "${_ilp_t:-?}" \
+        "$(nb_inst_tamanho "${_ilp_s:-0}")" "$_ilp_f" "$_ilp_l")"
+}
+
+nb_inst_linha_disco() {
+    _ild_s=$(cat "$NB_INST_SYS_BLOCK/$1/size" 2> /dev/null)
+    nb_ui_dim "    (disk /dev/$1: $(nb_inst_modelo "$NB_INST_SYS_BLOCK/$1"), $(nb_inst_tamanho "${_ild_s:-0}"))"
+}
+
+# A tela da pergunta ao lado do Windows. $1 marca de erro, $2 a ESP, $3 a
+# partição do sistema, $4 o livre nela (KB). O resto vem do nb_inst_esp_info.
+nb_inst_tela_lado() {
+    nb_screen "CONFIRM" \
+        "!Install Maratona Linux NEXT TO WINDOWS. Nothing is erased." \
+        "" \
+        "!The boot loader goes to the EFI system partition (EFI/nutellaboot):"
+    nb_inst_linha_part "$2" "$NB_INST_ESPLIVRE"
+    nb_ui_text "The kernel goes next to the system files (nutellaboot/boot):"
+    nb_inst_linha_part "$3" "$4"
+    _itl_d1=$(nb_inst_disco_de "$2")
+    _itl_d2=$(nb_inst_disco_de "$3")
+    nb_inst_linha_disco "$_itl_d1"
+    if [ "$_itl_d2" != "$_itl_d1" ]; then
+        nb_inst_linha_disco "$_itl_d2"
+    fi
+    printf '\n'
+    nb_ui_dim "The firmware gets the boot entry '$NB_INST_LABEL', first in the order."
+    if [ -n "$NB_INST_ESPWIN" ]; then
+        nb_ui_dim "Windows stays: it is in the Maratona boot menu."
+    else
+        nb_ui_dim "The other systems stay in the firmware boot menu."
+    fi
+    if [ -n "$NB_INST_ESPVELHO" ]; then
+        nb_ui_dim "The Maratona boot loader already there is replaced."
+    fi
+    nb_inst_tela_pergunta "$1" "to install"
+}
+
 nb_inst_lado() {
     # a partição do sistema: a mesma que o boot de sempre escolheria
     nb_find_storage
@@ -720,6 +941,13 @@ nb_inst_lado() {
     [ -n "$_ila_part" ] || nb_no_disk_screen
     _ila_esp=$(nb_inst_acha_esp "$_ila_part")
     [ -n "$_ila_esp" ] || nb_inst_sem_esp_screen
+    nb_inst_esp_info "$_ila_esp"
+    _ila_sislivre=$(df -Pk "$BLOCKROOT" 2> /dev/null | awk 'END {print $4}')
+    if ! nb_inst_pergunta nb_inst_tela_lado "$_ila_esp" "$_ila_part" "$_ila_sislivre"; then
+        umount "$BLOCKROOT" 2> /dev/null
+        nb_inst_cancelada lado
+    fi
+    nb_inst_baixa
 
     # a imagem da sede, só para ler o que vai para o disco
     mkdir -p "$NB_INST_ESPMNT" "$NB_INST_IMGMNT"
@@ -736,7 +964,7 @@ nb_inst_lado() {
     # anterior será substituída: o espaço dela conta como livre.
     _ila_dir=$NB_INST_ESPMNT/EFI/nutellaboot
     _ila_precisa=$(($(stat -c %s "$NB_INST_IMGMNT/EFI/BOOT/BOOTX64.EFI") / 1024 + 1024))
-    _ila_livre=$(df -k "$NB_INST_ESPMNT" | awk 'END {print $4}')
+    _ila_livre=$(df -Pk "$NB_INST_ESPMNT" | awk 'END {print $4}')
     if [ -d "$_ila_dir" ]; then
         _ila_livre=$((_ila_livre + $(du -sk "$_ila_dir" | awk '{print $1}')))
     fi
@@ -784,7 +1012,7 @@ nb_inst_lado() {
     _ila_num=$(cat "$NB_SYS_CLASS_BLOCK/$_ila_esp/partition" 2> /dev/null)
     nb_inst_efi_entrada "$NB_INST_DEV/$_ila_disco" "$_ila_num" '\EFI\nutellaboot\grubx64.efi' ||
         nb_inst_falhou "the firmware refused the boot entry"
-    nb_inst_fim "Windows stays: it is the last entry of the boot menu." \
+    nb_inst_fim "Windows stays: it is in the Maratona boot menu." \
         "The firmware got a boot entry named '$NB_INST_LABEL', now the first."
 }
 
