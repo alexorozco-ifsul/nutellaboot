@@ -39,6 +39,9 @@ class Principal:
     # serviço com `labs:read`: de quem é a visão da frota que a chave segue
     # (services/fleet_views.py); vazio = só os globs, como sempre foi
     follow: str = ""
+    # serviço: de quem é a chave. "admin" (ou vazio) = da administração;
+    # `invite:<CÓDIGO>` = de um sub-admin, e ela só alcança as imagens dele
+    key_owner: str = ""
     # admin: impressão digital da chave (o começo do hash). A sessão a guarda
     # para morrer junto com ESTA chave, e não com qualquer uma de mesmo id
     key_fp: str = ""
@@ -55,18 +58,71 @@ class Principal:
             return self.name
         return ""
 
-    def can_see_image(self, image_id: str) -> bool:
+    @property
+    def chave_de_subadmin(self) -> bool:
+        return self.kind == "service" and self.key_owner not in ("", "admin")
+
+    def can_see_image(self, image_id: str, dono: str | None = None) -> bool:
+        """`dono`: o `owner` da imagem, quando quem pergunta já o tem na mão
+        (uma lista); sem ele, a chave de sub-admin lê o `image.json`."""
         if self.kind == "admin":
             return True
         if self.kind == "service":
-            return not self.images or any(
-                fnmatch.fnmatch(image_id, pat) for pat in self.images
-            )
+            if self.chave_de_subadmin and dono is None:
+                from .services import store
+
+                dono = store.site_image_owner(image_id)
+            return servico_alcanca(self.images, self.key_owner, image_id, dono or "admin")
         if self.kind == "subadmin":
             from .services import store
 
             return store.site_image_owner(image_id) == self.name
         return self.name == image_id
+
+
+def servico_alcanca(globs: list[str], dono_da_chave: str, image_id: str, dono_da_imagem: str) -> bool:
+    """A regra de alcance de uma chave de serviço, num lugar só.
+
+    Da administração, o glob decide (lista vazia = todas). De sub-admin, o glob
+    vale DENTRO das imagens do dono, conferido a cada requisição: nome de
+    imagem é livre por ordem de chegada, então conferir o glob na criação não
+    segura a imagem que outra pessoa cria depois com um nome que casa."""
+    if dono_da_chave not in ("", "admin") and dono_da_imagem != dono_da_chave:
+        return False
+    return not globs or any(fnmatch.fnmatch(image_id, pat) for pat in globs)
+
+
+def exigir_imagem_do_servico(p: Principal, image: str) -> None:
+    """A chave de serviço numa rota de imagem: existe, é do dono, está no glob.
+
+    A chave da administração recebe 404 se a imagem não existe e 403
+    `image_out_of_scope` fora do glob: quem a emite enxerga tudo, e o 403 é o
+    erro útil para quem integra. A de sub-admin segue o console de quem a
+    criou (invariante 11): a imagem de outro dono NÃO EXISTE, 404 como a que
+    não existe, senão a chave viraria oráculo de nomes. O 403 fica para a
+    imagem dele fora do glob."""
+    if not _site_image_dir(image).is_dir():
+        raise erro(404, "image_not_found", "imagem não existe")
+    dono = None
+    if p.chave_de_subadmin:
+        from .services import store
+
+        dono = store.site_image_owner(image)
+        if dono != p.key_owner:
+            raise erro(404, "image_not_found", "imagem não existe")
+    if not p.can_see_image(image, dono):
+        raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
+
+
+def _dono_da_chave_vale(dono: str) -> bool:
+    """A chave de um sub-admin vale enquanto o console dele vale: suspenso,
+    revogado, vencido ou apagado, ela para junto. Confere direto, sem o
+    `identify_subadmin`: aquele chama `owners.ensure`, que grava o último
+    acesso em disco, e o MOJ sonda o tempo todo."""
+    from .services import invites, owners
+
+    ok, _ = invites.is_valid_for_console(owners.code_of(dono))
+    return ok and not owners.disabled(dono)
 
 
 def _bearer(authorization: str | None) -> str | None:
@@ -94,6 +150,9 @@ def identify(token: str | None, image_id: str | None = None) -> Principal | None
     services = fsdb.read_json(settings.data_root / "keys" / "services.json", {})
     for name, entry in services.items():
         if secrets.compare_digest(th, entry.get("sha256", "")):
+            dono = str(entry.get("owner") or "admin")
+            if dono != "admin" and not _dono_da_chave_vale(dono):
+                return None
             keyusage.tocar("service", name)
             return Principal(
                 "service",
@@ -101,6 +160,7 @@ def identify(token: str | None, image_id: str | None = None) -> Principal | None
                 scopes=set(entry.get("scopes", [])),
                 images=list(entry.get("images", [])),
                 follow=str(entry.get("follow") or ""),
+                key_owner=dono,
             )
 
     if image_id:
@@ -332,15 +392,12 @@ def require_image_access(
         if not p:
             raise _unauthorized()
         if p.kind == "service":
-            # serviço é credencial que a administração emitiu (o MOJ): erro
-            # claro vale mais que sigilo, e quem integra precisa distinguir
-            # "faltou escopo" de "essa sala não é sua"
+            # erro claro vale mais que sigilo para quem integra: "faltou
+            # escopo" e "fora do glob" são 403 distintos (o de sub-admin
+            # responde 404 na imagem de outro dono: exigir_imagem_do_servico)
             if not escopos or (QUALQUER not in escopos and not p.scopes.intersection(escopos)):
                 raise erro(403, "insufficient_scope", "escopo insuficiente")
-            if not _site_image_dir(image).is_dir():
-                raise erro(404, "image_not_found", "imagem não existe")
-            if not p.can_see_image(image):
-                raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
+            exigir_imagem_do_servico(p, image)
             return p
         # invariante 11: para quem entra pelo console (ou com token de outra
         # imagem), o que não é seu não existe. Um 403 aqui viraria oráculo de
@@ -380,7 +437,7 @@ def conferir_reauth(p: Principal, request: Request, authorization: str | None, c
 def require_admin_or_service(scope: str):
     """Rota de uma imagem que é da ADMINISTRAÇÃO (sub-admin e token da sede não
     entram) e que uma chave de serviço com `scope` também alcança, dentro do
-    glob dela. É o caso dos webhooks."""
+    glob dela. É o caso dos webhooks: a chave só vê os que ela criou."""
 
     async def dep(
         image: str, request: Request = None, authorization: str | None = Header(None)
@@ -389,10 +446,7 @@ def require_admin_or_service(scope: str):
         if p is not None and p.kind == "service":
             if scope not in p.scopes:
                 raise erro(403, "insufficient_scope", "escopo insuficiente")
-            if not _site_image_dir(image).is_dir():
-                raise erro(404, "image_not_found", "imagem não existe")
-            if not p.can_see_image(image):
-                raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
+            exigir_imagem_do_servico(p, image)
             return p
         if not p or p.kind != "admin":
             raise _unauthorized()

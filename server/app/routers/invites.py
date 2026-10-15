@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import auth
-from ..services import audit, invites, owners, ownership, requests, store, usb
+from ..services import audit, invites, keys, owners, ownership, requests, store, usb
 
 router = APIRouter(prefix="/api/v1")
 
@@ -23,6 +23,7 @@ def _campos_do_convite(body: dict, *, label: str = "", note: str = "") -> dict:
             "max_images": int(body.get("max_images", invites.DEFAULT_MAX_IMAGES)),
             "max_models": int(body.get("max_models", owners.DEFAULT_MAX_MODELS)),
             "build_quota": int(body.get("build_quota", invites.DEFAULT_BUILD_QUOTA)),
+            "max_service_keys": int(body.get("max_service_keys", invites.DEFAULT_MAX_SERVICE_KEYS)),
             "model": model,
             "expires_at": body.get("expires_at"),
             "note": str(body.get("note") or note),
@@ -52,7 +53,7 @@ async def list_invites(p=Depends(auth.require_admin)) -> dict:
     }
 
 
-_INTEIROS = ("max_images", "max_models", "build_quota")
+_INTEIROS = ("max_images", "max_models", "build_quota", "max_service_keys")
 _BOOLEANOS = ("revoked", "unlocked", "wallpaper_locked")
 _TEXTOS = ("label", "note")
 
@@ -107,15 +108,19 @@ async def delete_invite(code: str, force: bool = False, p=Depends(auth.require_a
     oid = owners.owner_id(code)
     modelos = store.list_models(owner=oid)
     imagens = [i["id"] for i in store.list_site_images(owner=oid)]
-    if (modelos or imagens) and not force:
+    chaves = keys.contar_do_dono(oid)
+    if (modelos or imagens or chaves) and not force:
         raise HTTPException(
             409,
             "este convite virou console de sub-admin; apagar tira o acesso a "
-            f"{len(modelos)} modelo(s) e {len(imagens)} site-image(s). "
+            f"{len(modelos)} modelo(s) e {len(imagens)} site-image(s) e apaga "
+            f"{chaves} chave(s) de serviço. "
             "Prefira suspender (POST /owners/{id}/disable) ou repita com ?force=true",
         )
     invites.delete(code)
-    return {"ok": True, "orphaned": {"models": modelos, "site_images": imagens}}
+    # as chaves já não valeriam sem o convite (auth confere o dono): saem junto
+    apagadas = keys.servico_apagar_do_dono(oid)
+    return {"ok": True, "orphaned": {"models": modelos, "site_images": imagens, "service_keys": apagadas}}
 
 
 # --- fila de pedidos (lado admin) ---

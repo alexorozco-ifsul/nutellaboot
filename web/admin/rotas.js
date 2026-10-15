@@ -24,7 +24,7 @@ export const ROTAS = {
   modelos: { admin: false, vista: modelos.vista, titulo: "nav_models" },
   camadas: { admin: false, vista: camadas.vista, titulo: "nav_layers" },
   pessoas: { admin: true, vista: pessoas.vista, titulo: "nav_people" },
-  chaves: { admin: true, vista: chaves.vista, titulo: "nav_keys" },
+  chaves: { admin: false, vista: chaves.vista, titulo: "nav_keys" },
   sistema: { admin: true, vista: sistema.vista, titulo: "nav_system" },
 };
 

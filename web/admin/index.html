@@ -38,14 +38,15 @@
   </form>
 
   <div id="panel" class="hidden">
-    <!-- Um assunto por aba. As três de baixo são só da administração: o
-         sub-admin nem as vê, e o endereço delas o leva de volta a Imagens. -->
+    <!-- Um assunto por aba. Pessoas e Sistema são só da administração: o
+         sub-admin nem as vê, e o endereço delas o leva de volta a Imagens. Em
+         Chaves, o sub-admin vê só as chaves de serviço dele. -->
     <nav id="abas" class="tabs">
       <a href="#imagens" data-aba="imagens" data-i18n="nav_images"></a>
       <a href="#modelos" data-aba="modelos" data-i18n="nav_models"></a>
       <a href="#camadas" data-aba="camadas" data-i18n="nav_layers"></a>
       <a href="#pessoas" data-aba="pessoas" data-admin-only data-i18n="nav_people"></a>
-      <a href="#chaves" data-aba="chaves" data-admin-only data-i18n="nav_keys"></a>
+      <a href="#chaves" data-aba="chaves" data-i18n="nav_keys"></a>
       <a href="#sistema" data-aba="sistema" data-admin-only data-i18n="nav_system"></a>
     </nav>
     <p id="cota" class="help hidden"></p>

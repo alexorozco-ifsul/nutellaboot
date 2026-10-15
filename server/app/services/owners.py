@@ -102,6 +102,7 @@ def quotas(owner: str) -> dict:
         "models": int(inv.get("max_models", DEFAULT_MAX_MODELS)),
         "site_images": int(inv.get("max_images", invites.DEFAULT_MAX_IMAGES)),
         "builds": int(inv.get("build_quota", invites.DEFAULT_BUILD_QUOTA)),
+        "service_keys": int(inv.get("max_service_keys", invites.DEFAULT_MAX_SERVICE_KEYS)),
     }
     base.update({k: v for k, v in (rec.get("quotas") or {}).items() if k in base})
     return base
@@ -109,12 +110,13 @@ def quotas(owner: str) -> dict:
 
 def usage(owner: str) -> dict:
     """Uso atual, varrendo o disco."""
-    from . import layerbuilds, store
+    from . import keys, layerbuilds, store
 
     return {
         "models": len(store.list_models(owner=owner)),
         "site_images": len(store.list_site_images(owner=owner)),
         "builds": layerbuilds.contar_do_dono(owner),
+        "service_keys": keys.contar_do_dono(owner),
     }
 
 

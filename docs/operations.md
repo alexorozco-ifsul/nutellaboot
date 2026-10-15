@@ -756,7 +756,9 @@ curl -X POST "$SERVER/api/v1/invites" \
 Cada código sai no formato `NB3-XXXX-XXXX-XXXX`. Os campos: `count` (quantos
 códigos gerar), `max_images` (quantas site-images o código cria, padrão 1),
 `max_models` (quantos modelos próprios, padrão 2), `build_quota` (quantas
-camadas de pacotes, padrão 5), `label` (nome amigável que aparece no console
+camadas de pacotes, padrão 5), `max_service_keys` (quantas chaves de serviço,
+para o MOJ e o telão do laboratório, padrão 5), `label` (nome amigável que
+aparece no console
 de quem recebe), `model` (opcional — fixa o modelo, senão a pessoa escolhe
 entre os públicos) e `expires_at` (opcional, epoch). Entregue o código por um
 canal privado.
@@ -1117,8 +1119,9 @@ O seletor de período ("30 min · 2 h · 5 h · 24 h · desde…") fica na URL:
 para o início da prova.
 
 Ao compartilhar, escolha o que o link mostra: **o link segue a minha seleção**
-(o padrão: ele mostra a visão da frota da administração, e muda na hora em que
-você a muda) ou **o link mostra só as imagens informadas abaixo** (um recorte
+(o padrão: ele mostra a visão da frota de quem criou o link, e muda na hora em
+que essa pessoa a muda; o sub-admin compartilha o telão do laboratório dele do
+mesmo jeito) ou **o link mostra só as imagens informadas abaixo** (um recorte
 fixo por globs, como `26br*`). O link que segue a seleção nunca se alarga
 sozinho, e os globs continuam sendo o teto.
 
@@ -1154,7 +1157,7 @@ da página: ele é a credencial de console daquela pessoa.
 
 A aba **Pessoas** do `/admin/` (só da administração) tem uma linha por convite,
 com o rótulo, a situação (não usado, em uso, suspenso, revogado, vencido), o uso
-das cotas (modelos, imagens, construções) e o último acesso. Quem entrou por
+das cotas (modelos, imagens, construções, chaves de serviço) e o último acesso. Quem entrou por
 convite é a mesma linha: o convite é a credencial do console da pessoa, e as
 cotas moram nele. Os pedidos pendentes aparecem no topo da aba.
 
@@ -1163,7 +1166,7 @@ Clique na linha para abrir a página da pessoa:
 - **Código do convite**: escondido; **Mostrar o código** quando for preciso
   reenviá-lo.
 - **Convite e cotas**: rótulo, validade, perfil das imagens, trava do papel de
-  parede e as três cotas, com um **Salvar** só.
+  parede e as quatro cotas, com um **Salvar** só.
 - **Uso**: o que a pessoa já criou.
 - **Acesso**: **Suspender** (existe depois que a pessoa entrou) fecha o console
   e a criação de imagens pelo `/criar/`. **Revogar** fecha o convite, com o
@@ -1174,8 +1177,9 @@ Clique na linha para abrir a página da pessoa:
 
 ### Chaves: ver, criar, revogar
 
-A aba **Chaves** do `/admin/` (só da administração) reúne o que antes pedia
-`curl` ou acesso ao servidor:
+A aba **Chaves** do `/admin/` reúne o que antes pedia `curl` ou acesso ao
+servidor. O sub-admin também a vê, só com as chaves de serviço dele (veja
+"Chaves de serviço de sub-admin", abaixo):
 
 - **Chaves de administração**: a lista (quem criou, quando, último uso, quantas
   sessões abertas, e qual é a desta sessão), criar e revogar. Criar e revogar
@@ -1188,7 +1192,27 @@ A aba **Chaves** do `/admin/` (só da administração) reúne o que antes pedia
   **Editar** muda escopos e globs; **Trocar** dá uma chave nova com o mesmo
   nome (a antiga morre na hora); **Revogar** apaga. Nome repetido é erro, não
   sobrescrita. O recomendado é uma chave por evento. O link do dashboard
-  compartilhado é uma delas (veja "Compartilhar o dashboard").
+  compartilhado é uma delas (veja "Compartilhar o dashboard"). A coluna
+  **Dono** diz se a chave é da administração ou de qual pessoa, e **Alcança
+  agora** conta as imagens que ela alcança neste momento.
+
+**Chaves de serviço de sub-admin.** Quem entrou por convite cria as chaves do
+próprio laboratório (o MOJ dele, o telão dele) na mesma aba, dentro da cota
+**Chaves de serviço** do convite (padrão 5):
+
+- o glob só alcança as imagens da pessoa, conferido a cada requisição. Uma
+  imagem que outra pessoa (ou a administração) cria depois com um nome que casa
+  fica de fora, e a de outro dono responde como se não existisse;
+- o nome ganha o sufixo `@<referência>` da pessoa, e por isso não colide com o
+  de ninguém;
+- o telão dela segue a visão da frota DELA, nunca a da administração;
+- a chave para junto com o console da pessoa: suspender, revogar ou deixar o
+  convite vencer corta as chaves, e reativar as devolve. Apagar o convite
+  apaga as chaves;
+- a chave nunca pode mais que a pessoa: numa imagem Oficial, os cadeados do
+  modelo valem para ela.
+
+A administração vê as chaves de todos, com o dono, e revoga qualquer uma.
 
 A **Auditoria das credenciais** (o que foi feito com chaves e convites, por quem
 e de onde) fica na aba **Sistema**. Ela não guarda segredo nenhum.
@@ -1401,7 +1425,8 @@ meia hora e o botão volta a funcionar — a passada não continua de onde parou
 ### Chave de serviço para o MOJ
 
 O juiz consome a API com uma chave `nb3s_` de escopos limitados, criada uma
-vez pela administração (`docs/api.md`, seção "Integração com o MOJ"):
+vez pela administração, ou pelo sub-admin para as imagens dele
+(`docs/api.md`, seção "Integração com o MOJ"):
 
 ```bash
 curl -sS -X POST "$SERVER/api/v1/service-keys" -H "Authorization: Bearer $ADMIN_KEY" \

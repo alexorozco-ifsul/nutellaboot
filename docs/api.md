@@ -77,8 +77,11 @@ token da site-image, **M** chave de máquina, **B** chave de boot, **—** abert
 > por ordem de chegada. Vale também para as rotas de uma site-image
 > (`config`, `machines`, `roster`, `alerts`, `layers`): sem credencial é
 > **401**, exista a imagem ou não; com credencial de outro dono, **404**.
-> A chave de **serviço** é a exceção: como é a administração que a emite, ela
-> recebe 403 de escopo ou de glob, que é o erro útil para quem integra.
+> A chave de **serviço da administração** é a exceção: quem a emite enxerga
+> tudo, e ela recebe 403 de escopo ou de glob, que é o erro útil para quem
+> integra. A chave de serviço criada por um **sub-admin** segue o console dele:
+> imagem de outro dono responde **404**, como a que não existe; o 403 fica para
+> escopo que falta e para imagem dele fora do glob.
 >
 > **401 × 403 para a chave de serviço.** `401` é só para credencial que não
 > vale (ausente, errada, revogada). Uma chave de serviço **válida** que bate
@@ -204,7 +207,7 @@ ALLOWNETWORKCHANGE='f'
 |---|---|---|---|---|
 | POST | `/api/v1/site-images` | C | `{id, fullname, model, unlocked?, wallpaper_locked?, dashboard_hidden?, country?}` (`dashboard_hidden` só a administração; `country` é ISO alpha-2). Para o sub-admin o convite decide: `unlocked: true` só se o convite for Livre, e `wallpaper_locked` é o do convite (valor diferente: **403**); a imagem herda o `build_quota` do convite | imagem criada **com as credenciais em claro** (única vez) |
 | POST | `/api/v1/site-images/bulk` | A | TSV ou `{rows:[…]}` | `{results:[…]}`; com `?format=csv`, CSV das credenciais |
-| GET | `/api/v1/site-images?prefix=` | C, S (qualquer escopo) | — | `{images:[…]}` (o sub-admin vê só as dele). Para a chave de serviço: só as imagens do glob, como `{id, fullname, country?, machines_total}` |
+| GET | `/api/v1/site-images?prefix=` | C, S (qualquer escopo) | — | `{images:[…]}` (o sub-admin vê só as dele). Para a chave de serviço: só as imagens do glob (a de sub-admin, só as do dono dela), como `{id, fullname, country?, machines_total}` |
 | GET | `/api/v1/site-images/{img}` | C, I, S (qualquer escopo, dentro do glob) | — | `image.json` **sem o `owner` cru** para quem não é o console dono (ver abaixo); sempre com `owner_kind`, `owner_label`, `owner_ref` |
 | PATCH | `/api/v1/site-images/{img}` | C | `{fullname?, unlocked?, model?, wallpaper_locked?, dashboard_hidden?}` | imagem atualizada |
 | DELETE | `/api/v1/site-images/{img}` | C | — | `204` (apaga também o pendrive gerado em `data/usb/` e o estado de publicação) |
@@ -315,19 +318,19 @@ Notas que economizam depuração:
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
-| GET | `/api/v1/whoami` | C, S (qualquer escopo) | — | console: `{kind, label, owner, can_create_reserved, can_publish_models, can_manage_invites, quotas, usage:{models, site_images, builds}}`, e para o sub-admin `invite_profile:{unlocked, wallpaper_locked}`; chave de serviço: `{kind:"service", name, label, scopes, image_globs, images}` |
+| GET | `/api/v1/whoami` | C, S (qualquer escopo) | — | console: `{kind, label, owner, can_create_reserved, can_publish_models, can_manage_invites, quotas, usage:{models, site_images, builds, service_keys}}`, e para o sub-admin `invite_profile:{unlocked, wallpaper_locked}`; chave de serviço: `{kind:"service", name, label, scopes, image_globs, images}` |
 | GET | `/api/v1/owners` | A | — | `{owners:[{id, owner_ref, label, quotas, usage, console_ok}]}` |
 | POST | `/api/v1/owners/{id}/disable` | A | `{disabled?: true}` | suspende (ou reativa) o console |
-| PATCH | `/api/v1/owners/{id}/quotas` | A | `{max_models?, max_images?, build_quota?}` | `{id, quotas, usage}` |
+| PATCH | `/api/v1/owners/{id}/quotas` | A | `{max_models?, max_images?, build_quota?, max_service_keys?}` | `{id, quotas, usage}` |
 
 **Convites** — a credencial de sub-administração é o próprio código:
 
 | Método | Caminho | Cred. | Corpo | Resposta |
 |---|---|---|---|---|
 | GET | `/api/v1/invites` | A | — | `{invites:[{code, owner_ref, …}]}`: o `owner_ref` junta o convite ao sub-admin (e às imagens dele) sem repetir o código |
-| POST | `/api/v1/invites` | A | `{label?, note?, model?, count?, max_images?, max_models?, build_quota?, expires_at?, unlocked?, wallpaper_locked?}` | `{invites:[…]}` — **com os códigos**; `count` emite vários de uma vez |
-| PATCH | `/api/v1/invites/{code}` | A | qualquer de `{label, note, max_images, max_models, build_quota, expires_at, revoked, unlocked, wallpaper_locked, model}` | o convite atualizado. `revoked: true` fecha o console e a criação **sem destruir nada** (o dono dos objetos fica) e volta atrás com `false` |
-| DELETE | `/api/v1/invites/{code}` | A | — | **409** listando o que ficaria órfão; `?force=true` apaga assim mesmo |
+| POST | `/api/v1/invites` | A | `{label?, note?, model?, count?, max_images?, max_models?, build_quota?, max_service_keys?, expires_at?, unlocked?, wallpaper_locked?}` | `{invites:[…]}` — **com os códigos**; `count` emite vários de uma vez |
+| PATCH | `/api/v1/invites/{code}` | A | qualquer de `{label, note, max_images, max_models, build_quota, max_service_keys, expires_at, revoked, unlocked, wallpaper_locked, model}` | o convite atualizado. `revoked: true` fecha o console e a criação **sem destruir nada** (o dono dos objetos fica) e volta atrás com `false` |
+| DELETE | `/api/v1/invites/{code}` | A | — | **409** listando o que ficaria órfão e quantas chaves de serviço sairiam; `?force=true` apaga assim mesmo, e as chaves de serviço do sub-admin saem junto (`orphaned.service_keys`) |
 
 `unlocked` no convite escolhe o perfil da imagem que ele vai criar: **Livre**
 (o dono manda em tudo) ou **Oficial** (valem os cadeados do modelo). `model`
@@ -337,7 +340,8 @@ prende o convite a um modelo só.
 mostrar; sem ele o console descobriria as próprias permissões apanhando de
 401/404.
 
-**Cotas** vêm do convite (`max_models`, `max_images`, `build_quota`) e o uso é
+**Cotas** vêm do convite (`max_models`, `max_images`, `build_quota`,
+`max_service_keys`, padrão 5) e o uso é
 contado **varrendo o disco**, não por contador: apagar um modelo libera a vaga
 na hora, e nenhuma limpeza feita por fora deixa a cota travada por engano.
 
@@ -652,11 +656,14 @@ não abre hotconfig (o painel exige `machines:read`, que não é concedido) nem
 roda comando (as rotas de comando exigem console). A visibilidade respeita os
 globs da chave, e os totais são recalculados do subconjunto visível.
 
-Uma chave `labs:read` pode **seguir a visão da administração** (`follow:
-"admin"` na chave): o link compartilhado mostra o que o admin escolheu, e muda
-na hora em que ele muda. Os globs da chave continuam sendo o teto, a chave
-ignora `?view=` e `?owner=` (o link não se alarga sozinho) e não recebe a conta
-do que ficou de fora. Chave sem `follow` se comporta como sempre.
+Uma chave `labs:read` pode **seguir a visão de quem a criou** (`follow:
+"owner"` na chave): o link compartilhado mostra o que a administração (ou o
+sub-admin dono da chave) escolheu, e muda na hora em que a escolha muda.
+`follow: "admin"` é o nome antigo da mesma coisa e só vale em chave da
+administração: o telão de um sub-admin nunca segue a escolha da administração.
+Os globs da chave continuam sendo o teto, a chave ignora `?view=` e `?owner=`
+(o link não se alarga sozinho) e não recebe a conta do que ficou de fora.
+Chave sem `follow` se comporta como sempre.
 
 `dias` responde **quantas máquinas de cada sede rodaram nos últimos X dias**, e
 são dois números porque a pergunta tem duas leituras: `active` é quem teve
@@ -956,11 +963,11 @@ de pacotes extras, gastando a cota dela:
 | POST | `/api/v1/site-images/{img}/webhooks/{id}/test` | A, S`webhooks:write` | — | entrega `webhook.test` agora: `{ok, status_code, error, elapsed_ms, delivery}` |
 | GET | `/api/v1/site-images/{img}/webhooks/deliveries?n=` | A, S`webhooks:write` | — | `{deliveries:[…]}`: as entregas que esgotaram as tentativas (`webhooks.log`) |
 | PUT | `/api/v1/site-images/{img}/webhooks` | A | `{webhooks:[{id?, url, secret?, events}]}` | `{ok, webhooks, kept}`: a lista inteira, só da administração (ver abaixo) |
-| POST | `/api/v1/service-keys` | A | `{name, scopes:[…], images:[globs], follow?}` | `{name, key, scopes, images, follow, created_at, created_by}`; a chave aparece **uma vez**. Nome que já existe é `409 key_exists` (não sobrescreve) |
-| GET | `/api/v1/service-keys` | A | — | `{service_keys:[{name, scopes, images, follow, created_at, created_by, rotated_at, last_used}]}`, sem as chaves |
-| PATCH | `/api/v1/service-keys/{nome}` | A | qualquer de `{scopes, images, follow}` | a chave atualizada (a credencial não muda) |
-| POST | `/api/v1/service-keys/{nome}/rotate` | A | — | chave nova com o **mesmo** nome, escopos e globs; a antiga morre na hora |
-| DELETE | `/api/v1/service-keys/{nome}` | A | — | `204` |
+| POST | `/api/v1/service-keys` | C | `{name, scopes:[…], images:[globs], follow?}` | `{name, key, scopes, images, follow, created_at, created_by, owner_kind, owner_label, owner_ref}`; a chave aparece **uma vez**. Nome que já existe é `409 key_exists` (não sobrescreve). A do sub-admin ganha o sufixo `@<owner_ref>` no nome |
+| GET | `/api/v1/service-keys` | C | — | `{service_keys:[{name, scopes, images, follow, created_at, created_by, rotated_at, last_used, owner_kind, owner_label, owner_ref, covers}]}`, sem as chaves. A administração vê todas; o sub-admin, só as dele. `covers`: quantas imagens a chave alcança agora |
+| PATCH | `/api/v1/service-keys/{nome}` | C | qualquer de `{scopes, images, follow}` | a chave atualizada (a credencial não muda). A de outro dono é `404 key_not_found` |
+| POST | `/api/v1/service-keys/{nome}/rotate` | C | — | chave nova com o **mesmo** nome, escopos e globs; a antiga morre na hora. A de outro dono é `404 key_not_found` |
+| DELETE | `/api/v1/service-keys/{nome}` | C | — | `204`, também para a que não existe e para a de outro dono (que fica) |
 | GET | `/api/v1/admin-keys` | A | — | `{keys:[{id, fp, created_at, created_by, last_used, current, sessions}]}` (`current`: a chave desta requisição) |
 | POST | `/api/v1/admin-keys` | A + reautenticação | `{id, current_key?}` | `201` `{id, key, fp, created_at}`; a chave aparece **uma vez** |
 | POST | `/api/v1/admin-keys/{id}/revoke` | A + reautenticação | `{current_key?, fp?, confirm?}` | `{revoked, fp, sessions_ended, remaining}` |
@@ -976,6 +983,26 @@ last_admin_key`); revogar a chave da própria sessão pede `confirm: "<id>"`
 `nb3-init` antigo), `fp` desempata (`409 key_ambiguous`). Revogar derruba as
 sessões abertas com aquela chave, e só elas. Não existe "rotacionar": crie a
 nova, confira que ela entra, e revogue a velha.
+
+**Chave de serviço de sub-admin.** O sub-admin cria as chaves dele (o MOJ e o
+telão do laboratório), com qualquer escopo do catálogo, inclusive
+`webhooks:write`. Quatro regras a separam da chave da administração:
+
+- **alcance:** o glob vale só dentro das imagens do dono, conferido a cada
+  requisição. A imagem que outra pessoa cria depois com um nome que casa fica
+  de fora, e glob vazio quer dizer todas as imagens do dono. Imagem de outro
+  dono responde **404**, como a que não existe;
+- **nome:** ganha o sufixo `@<owner_ref>` (o `@` não vale no nome de uma chave
+  da administração), então ninguém colide com ninguém e o `409` não conta o que
+  os outros têm. Até 20 globs de até 64 caracteres;
+- **validade:** a chave vale enquanto o console do dono vale. Suspenso, revogado
+  ou vencido, ela responde **401**, e volta quando ele é reativado. Apagar o
+  convite apaga as chaves;
+- **cota:** `max_service_keys` do convite, padrão 5.
+
+`created_by` de uma chave de sub-admin é a referência do dono, nunca o código do
+convite, e a chave nunca pode mais que o dono: os cadeados do modelo valem
+para ela como valem para ele.
 
 `last_used` (de chave de admin e de serviço) é mantido em memória e vai ao
 disco no máximo uma vez por minuto; serve para achar chave esquecida, não para
@@ -1084,8 +1111,9 @@ Os exemplos abaixo usam a sede `26brbr`.
 
 ### 1. Criar a chave de serviço
 
-Feito pela administração. Os escopos limitam o que a chave faz, e `images`
-limita onde ela age. O recomendado é **uma chave por evento**, com o glob das
+Feito pela administração, ou por um sub-admin para as imagens dele (aba
+**Chaves** do console; veja "Chave de serviço de sub-admin"). Os escopos
+limitam o que a chave faz, e `images` limita onde ela age. O recomendado é **uma chave por evento**, com o glob das
 imagens daquele evento: a chave de administração não precisa ficar gravada em
 lugar nenhum do lado de quem integra.
 

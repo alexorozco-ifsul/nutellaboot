@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 
 from .. import auth
-from . import invites, layerbuilds, owners, store
+from . import invites, keys, layerbuilds, owners, store
 
 
 def is_admin(p: auth.Principal) -> bool:
@@ -135,10 +135,13 @@ def visible_site_images(p: auth.Principal, prefix: str = "") -> list[dict]:
     if is_admin(p):
         return store.list_site_images(prefix)
     if getattr(p, "kind", "") == "service":
-        # serviço filtra pelos GLOBS da chave, não por dono: o owner de
-        # serviço é "" e o filtro por dono daria tudo-ou-nada errado (a chave
-        # compartilhada do dashboard com images=["26br*"] veria zero sedes)
-        return [i for i in store.list_site_images(prefix) if p.can_see_image(i["id"])]
+        # serviço filtra pelos GLOBS da chave (o owner de serviço é "", e o
+        # filtro por dono daria tudo-ou-nada errado: a chave compartilhada do
+        # dashboard com images=["26br*"] veria zero sedes). A de sub-admin
+        # filtra também pelo dono dela, dentro de can_see_image
+        return [
+            i for i in store.list_site_images(prefix) if p.can_see_image(i["id"], str(i.get("owner") or "admin"))
+        ]
     return store.list_site_images(prefix, owner=p.owner)
 
 
@@ -207,11 +210,12 @@ def whoami(p: auth.Principal) -> dict:
             "can_create_reserved": True,
             "can_publish_models": True,
             "can_manage_invites": True,
-            "quotas": {"models": None, "site_images": None, "builds": None},
+            "quotas": {"models": None, "site_images": None, "builds": None, "service_keys": None},
             "usage": {
                 "models": len(store.list_models()),
                 "site_images": len(store.list_site_images()),
                 "builds": sum(1 for _ in layerbuilds.todos()),
+                "service_keys": keys.contar(),
             },
         }
     rec = owners.get(p.owner) or {}

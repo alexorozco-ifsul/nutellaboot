@@ -59,9 +59,13 @@ def test_alterar_escopos_e_globs_sem_trocar_a_chave(client, ha):
     assert client.patch("/api/v1/service-keys/moj", json={"scopes": ["voar"]}, headers=ha).status_code == 400
 
 
-def test_follow_so_com_labs_read_e_so_a_administracao(client, ha):
+def test_follow_so_com_labs_read(client, ha):
+    """`owner` segue a visão de quem criou a chave; `admin` é o nome antigo, e
+    só a chave da administração o aceita (tests/test_service_keys_subadmin.py)."""
     assert _criar(client, ha, nome="a", follow="admin").status_code == 400
     assert _criar(client, ha, nome="b", scopes=["labs:read"], follow="outro").status_code == 400
+    r = _criar(client, ha, nome="dono", scopes=["labs:read"], images=[], follow="owner")
+    assert r.status_code == 200 and r.json()["follow"] == "owner"
     r = _criar(client, ha, nome="telao", scopes=["labs:read"], images=[], follow="admin")
     assert r.status_code == 200 and r.json()["follow"] == "admin"
     assert client.patch("/api/v1/service-keys/telao", json={"follow": ""}, headers=ha).json()["follow"] == ""
@@ -91,9 +95,12 @@ def test_ultimo_uso_nao_escreve_em_disco_por_requisicao(client, ha, data_root):
     assert isinstance(keyusage.ultimo("service", "moj"), int)
 
 
-def test_revogar_e_so_a_administracao(client, ha):
+def test_revogar_apaga_e_o_sub_admin_so_cria_a_dele(client, ha):
     _criar(client, ha)
     assert client.delete("/api/v1/service-keys/moj", headers=ha).status_code == 204
     assert client.get("/api/v1/service-keys", headers=ha).json()["service_keys"] == []
+    # o sub-admin cria chave, mas a dele ganha o sufixo do dono e só alcança as
+    # imagens dele (tests/test_service_keys_subadmin.py)
     code = client.post("/api/v1/invites", json={"count": 1}, headers=ha).json()["invites"][0]["code"]
-    assert _criar(client, {"Authorization": f"Bearer {code}"}).status_code == 401
+    r = _criar(client, {"Authorization": f"Bearer {code}"})
+    assert r.status_code == 200 and r.json()["name"].startswith("moj@")

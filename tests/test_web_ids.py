@@ -94,12 +94,13 @@ def test_alerta_chega_sem_esperar_o_agrupamento():
 
 @pytest.mark.parametrize(
     "aba,so_admin",
-    [("imagens", False), ("modelos", False), ("camadas", False), ("pessoas", True), ("chaves", True), ("sistema", True)],
+    [("imagens", False), ("modelos", False), ("camadas", False), ("pessoas", True), ("chaves", False), ("sistema", True)],
 )
 def test_console_marca_o_que_e_so_da_administracao(aba, so_admin):
-    """Sub-admin não vê convites, pedidos, chaves, publicação nem auditoria: a
-    aba some (data-admin-only) E o roteador não a abre (`admin: true`), para o
-    endereço digitado à mão também voltar à aba padrão."""
+    """Sub-admin não vê convites, pedidos, publicação nem auditoria: a aba
+    some (data-admin-only) E o roteador não a abre (`admin: true`), para o
+    endereço digitado à mão também voltar à aba padrão. Chaves abre para ele só
+    com as chaves de serviço dele (`test_a_aba_chaves_so_mostra_as_de_admin_a_administracao`)."""
     html = (WEB / "admin" / "index.html").read_text(encoding="utf-8")
     link = re.search(rf'<a href="#{aba}"[^>]*>', html)
     assert link, f"a aba {aba} sumiu"
@@ -107,6 +108,19 @@ def test_console_marca_o_que_e_so_da_administracao(aba, so_admin):
     rotas = (WEB / "admin" / "rotas.js").read_text(encoding="utf-8")
     assert re.search(rf"\b{aba}: \{{ admin: {'true' if so_admin else 'false'},", rotas), aba
     assert "ROTAS[aba].admin" in rotas, "o roteador tem de consultar a marca"
+
+
+def test_a_aba_chaves_so_mostra_as_de_admin_a_administracao():
+    """A aba Chaves abriu para o sub-admin por causa das chaves de serviço
+    dele; a seção das chaves de administração continua só da administração (a
+    rota responde 401 a ele, e a tela concluiria que a sessão caiu)."""
+    js = (WEB / "admin" / "chaves.js").read_text(encoding="utf-8")
+    vista = js.split("export const vista = ", 1)[1]
+    trecho = vista.split("if (ehAdmin()) {", 1)
+    assert len(trecho) == 2, "a seção de admin tem de estar dentro de if (ehAdmin())"
+    dentro = trecho[1].split("\n  }\n", 1)[0]  # o fim do bloco, não o do objeto
+    assert "desenharAdmin(" in dentro and "desenharAdmin(" not in trecho[0]
+    assert "desenharServico(" in vista
 
 
 def _imports(js: Path) -> list[str]:

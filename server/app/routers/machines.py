@@ -582,12 +582,12 @@ async def events(image: str, request: Request, tk: str = Query("")) -> Streaming
 
         # EventSource não recebe cookie: não renova (ver auth.principal_de_link)
         p = sessions.resolve(request.cookies.get(sessions.COOKIE, ""), renovar=False)
-    if p is not None and p.kind == "service" and not p.scopes.intersection(ESCOPOS_DO_FLUXO):
-        # o fluxo leva MAC, status e comando de cada máquina: a chave do telão
-        # (`labs:read`, só agregados) entrava aqui com escopo nenhum
-        raise erro(403, "insufficient_scope", "o fluxo pede machines:read ou roster:read")
-    if p is not None and p.kind == "service" and not p.can_see_image(image):
-        raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
+    if p is not None and p.kind == "service":
+        if not p.scopes.intersection(ESCOPOS_DO_FLUXO):
+            # o fluxo leva MAC, status e comando de cada máquina: a chave do
+            # telão (`labs:read`, só agregados) entrava aqui com escopo nenhum
+            raise erro(403, "insufficient_scope", "o fluxo pede machines:read ou roster:read")
+        auth.exigir_imagem_do_servico(p, image)
     if not p or not p.can_see_image(image):
         raise HTTPException(401, "credencial inválida")
 

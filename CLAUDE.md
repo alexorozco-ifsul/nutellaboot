@@ -80,9 +80,11 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     (`services/ownership.py`) **e** para `auth.require_image_access`, que
     devolvia 403 e conferia a existência antes da credencial: eram dois
     oráculos de nomes de sala em ~26 rotas (config, machines, roster, alerts,
-    layers). Chave de serviço é a exceção: quem a emite é a administração,
-    então 403 de escopo/glob ali é o erro útil. Há teste
-    (`tests/test_subadmin.py`).
+    layers). Chave de serviço DA ADMINISTRAÇÃO é a exceção: quem a emite
+    enxerga tudo, então 403 de escopo/glob ali é o erro útil. A chave criada
+    por um sub-admin segue o console dele: imagem de outro dono é 404
+    (`auth.exigir_imagem_do_servico`). Há teste (`tests/test_subadmin.py`,
+    `tests/test_service_keys_subadmin.py`).
 
 12. **As mensagens do caminho de boot são em inglês, e saem pelo
     `client/stuff/05-ui.sh`.** É a única parte do sistema que não é traduzida
@@ -279,7 +281,7 @@ O nome antigo era *template*/*image*; a migração está em
 | `nb3a_` | administração | hash em `data/keys/admin.json` |
 | cookie `nb3_session` | console no navegador | `data/sessions.json` (0600, 30 dias) |
 | `NB3-…` | sub-admin (o próprio convite) | claro em `data/invites.json` |
-| `nb3s_` | serviços externos (MOJ), com escopos | hash em `data/keys/services.json` |
+| `nb3s_` | serviços externos (MOJ, telão), com escopos; da administração ou de um sub-admin (só as imagens dele) | hash em `data/keys/services.json` |
 | `nb3i_` | dono da imagem (configureitor, hotconfig) | `data/site-images/<id>/token` |
 | `nb3m_` | máquina (telemetria, fila de comandos) | `data/site-images/<id>/machine.key` |
 | `nb3b_` | pendrive (endpoints de boot) | `data/site-images/<id>/boot.key` |
@@ -293,7 +295,7 @@ o primeiro. Rota nova de console usa `require_console` + as funções de
 ```bash
 tools/nb3-init                     # instalação nova: emite e IMPRIME a chave
 tools/nb3-dev                      # servidor em 127.0.0.1:8890
-.venv/bin/python -m pytest -q      # 1406 testes, ~4 min
+.venv/bin/python -m pytest -q      # 1428 testes, ~4 min
 tools/nb3-seed-testdata            # dados de teste (não é instalação)
 tools/nb3-layer-worker --check     # confere as ferramentas rootless
 ```
@@ -506,6 +508,15 @@ O ambiente de teste tem um nginx externo que faz proxy de
   chave do link do telão (`labs:read`) viaja na URL e baixava o `conf` de toda
   imagem do glob. Rota nova que entrega segredo de imagem por `?tk=` confere o
   `kind` antes do glob, e o SSE pede `machines:read` ou `roster:read`.
+- **Chave de serviço de sub-admin: o glob vale dentro das imagens do dono,
+  conferido A CADA requisição** (`auth.servico_alcanca`, um lugar só, usado por
+  `Principal.can_see_image`, `auth.exigir_imagem_do_servico` e o `covers` da
+  lista). Conferir o glob na criação não segura a imagem que outra pessoa cria
+  depois com um nome que casa. A chave guarda `owner` (o código do convite: só
+  sai como `owner_ref`/rótulo), ganha o sufixo `@<owner_ref>` no nome e vale
+  enquanto o console do dono vale. A conferência do dono no `identify` não
+  passa por `identify_subadmin`: o `owners.ensure` dele grava em disco, e o MOJ
+  sonda o tempo todo.
 - Os mapas em memória do processo (`keyusage`, `presence`, `ratelimit`) valem
   entre testes: `conftest.data_root` zera os dois primeiros; teste que mexe em
   limite de taxa chama `ratelimit.reset()`.

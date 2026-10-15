@@ -1,9 +1,11 @@
-"""As credenciais que a administração emite: chaves de admin e de serviço.
+"""As credenciais emitidas pelo console: chaves de admin e de serviço.
 
-Tudo aqui é `require_admin`. As rotas de chave de ADMIN pedem mais: a chave
-redigitada (`current_key`) quando a requisição vem por cookie, porque cunhar
-uma chave de admin é o único ato que sobrevive à sessão que o fez (ver
-`auth.conferir_reauth`). Cada ato fica na auditoria.
+As de ADMIN são só da administração e pedem mais: a chave redigitada
+(`current_key`) quando a requisição vem por cookie, porque cunhar uma chave de
+admin é o único ato que sobrevive à sessão que o fez (ver
+`auth.conferir_reauth`). As de serviço são do console inteiro: a administração
+vê e mexe em todas, e o sub-admin cria e mexe nas dele, que só alcançam as
+imagens dele (`auth.servico_alcanca`). Cada ato fica na auditoria.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request, Response
 
 from .. import auth
 from ..errors import erro
-from ..services import audit, keys, sessions
+from ..services import audit, keys, ownership, sessions
 from .webhooks import ESCOPOS
 
 router = APIRouter(prefix="/api/v1")
@@ -91,14 +93,34 @@ def _confere_escopos(escopos) -> list[str]:
     return escopos
 
 
+def _dono(p) -> str:
+    """De quem é a chave que `p` cria: da administração, ou do sub-admin."""
+    return keys.ADMIN if p.kind == "admin" else p.owner
+
+
+def _filtro(p) -> str | None:
+    """A administração vê e mexe em todas; o sub-admin, só nas dele."""
+    return None if p.kind == "admin" else p.owner
+
+
 @router.post("/service-keys")
-async def create_service_key(body: dict, request: Request, p=Depends(auth.require_admin)) -> dict:
-    """Cria a credencial que o MOJ usa. O escopo limita o que ela faz e
-    `images` limita a quais imagens ela enxerga. A chave aparece UMA vez."""
+async def create_service_key(body: dict, request: Request, p=Depends(auth.require_console)) -> dict:
+    """Cria a credencial que o MOJ (ou o telão) usa. O escopo limita o que ela
+    faz e `images` limita a quais imagens ela enxerga. A de um sub-admin ganha o
+    sufixo `@<owner_ref>` no nome, entra na cota dele e só alcança as imagens
+    dele, conferido a cada requisição. A chave aparece UMA vez."""
     escopos = _confere_escopos(body.get("scopes"))
+    dono = _dono(p)
     try:
         nova = keys.servico_criar(
-            body.get("name"), escopos, body.get("images") or [], body.get("follow") or "", by=p.name
+            body.get("name"),
+            escopos,
+            body.get("images") or [],
+            body.get("follow") or "",
+            # o id do sub-admin é o código do convite: aqui vai a referência
+            by=p.name if p.kind == "admin" else ownership.owner_ref(dono),
+            dono=dono,
+            teto=ownership.quota(p, "service_keys"),
         )
     except keys.ErroDeChave as e:
         raise _levanta(e)
@@ -108,17 +130,17 @@ async def create_service_key(body: dict, request: Request, p=Depends(auth.requir
 
 
 @router.get("/service-keys")
-async def list_service_keys(p=Depends(auth.require_admin)) -> dict:
-    return {"service_keys": keys.servico_listar()}
+async def list_service_keys(p=Depends(auth.require_console)) -> dict:
+    return {"service_keys": keys.servico_listar(_filtro(p))}
 
 
 @router.patch("/service-keys/{name}")
-async def patch_service_key(name: str, body: dict, request: Request, p=Depends(auth.require_admin)) -> dict:
+async def patch_service_key(name: str, body: dict, request: Request, p=Depends(auth.require_console)) -> dict:
     campos = {k: body[k] for k in ("scopes", "images", "follow") if k in body}
     if "scopes" in campos:
         campos["scopes"] = _confere_escopos(campos["scopes"])
     try:
-        r = keys.servico_alterar(name, campos)
+        r = keys.servico_alterar(name, campos, _filtro(p))
     except keys.ErroDeChave as e:
         raise _levanta(e)
     audit.registrar(p, request, "service_key.changed", name, campos)
@@ -126,10 +148,10 @@ async def patch_service_key(name: str, body: dict, request: Request, p=Depends(a
 
 
 @router.post("/service-keys/{name}/rotate")
-async def rotate_service_key(name: str, request: Request, p=Depends(auth.require_admin)) -> dict:
+async def rotate_service_key(name: str, request: Request, p=Depends(auth.require_console)) -> dict:
     """Chave nova com o MESMO nome, escopos e globs. A antiga morre na hora."""
     try:
-        r = keys.servico_rotacionar(name)
+        r = keys.servico_rotacionar(name, _filtro(p))
     except keys.ErroDeChave as e:
         raise _levanta(e)
     audit.registrar(p, request, "service_key.rotated", name)
@@ -137,8 +159,9 @@ async def rotate_service_key(name: str, request: Request, p=Depends(auth.require
 
 
 @router.delete("/service-keys/{name}", status_code=204)
-async def delete_service_key(name: str, request: Request, p=Depends(auth.require_admin)) -> Response:
-    if keys.servico_apagar(name):
+async def delete_service_key(name: str, request: Request, p=Depends(auth.require_console)) -> Response:
+    # a de outro dono responde o mesmo 204 da que não existe, e fica
+    if keys.servico_apagar(name, _filtro(p)):
         audit.registrar(p, request, "service_key.revoked", name)
     return Response(status_code=204)
 

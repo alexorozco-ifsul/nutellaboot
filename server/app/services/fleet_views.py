@@ -17,9 +17,10 @@ Três regras:
 - imagem criada depois de um `custom` salvo fica FORA até ser escolhida (o
   laboratório novo de alguém não pode pular para o telão sozinho). `mine` e
   `owners` pegam as novas daqueles donos;
-- uma chave `labs:read` pode SEGUIR a visão da administração (`follow`), e o
-  glob dela continua sendo o teto: o link compartilhado mostra o que o admin
-  escolheu, sem poder alargar-se sozinho.
+- uma chave `labs:read` pode SEGUIR a visão de quem a criou (`follow`: a da
+  administração, ou a do sub-admin), e o glob dela continua sendo o teto: o
+  link compartilhado mostra o que o dono escolheu, sem poder alargar-se
+  sozinho.
 """
 
 from __future__ import annotations
@@ -136,6 +137,10 @@ def resolver(p, *, view: str = "", owner: str = "") -> tuple[list[dict], dict]:
         seguido = getattr(p, "follow", "")
         if not seguido:
             return base, {}
+        if seguido == "owner":
+            # a visão de quem criou a chave: a da administração ou a do
+            # sub-admin (o glob e o dono da chave continuam sendo o teto)
+            seguido = getattr(p, "key_owner", "") or "admin"
         return _filtra(get(seguido), base, seguido), {"following": True}
 
     salva = get(p.owner)
