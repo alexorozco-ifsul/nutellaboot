@@ -293,7 +293,7 @@ o primeiro. Rota nova de console usa `require_console` + as funções de
 ```bash
 tools/nb3-init                     # instalação nova: emite e IMPRIME a chave
 tools/nb3-dev                      # servidor em 127.0.0.1:8890
-.venv/bin/python -m pytest -q      # 1399 testes, ~4 min
+.venv/bin/python -m pytest -q      # 1406 testes, ~4 min
 tools/nb3-seed-testdata            # dados de teste (não é instalação)
 tools/nb3-layer-worker --check     # confere as ferramentas rootless
 ```
@@ -500,6 +500,12 @@ O ambiente de teste tem um nginx externo que faz proxy de
 - `admin.json` e `services.json` só se escrevem por `services/keys.py` (lock,
   data, quem criou). Nome de chave de serviço repetido é 409: sobrescrever
   trocava a credencial do MOJ calado. Trocar é `rotate`.
+- **Chave de serviço não baixa nada do pendrive** (`routers/usb.py`,
+  `_quem_baixa`), com escopo nenhum. O `conf` e as imagens da sala levam a
+  chave de boot, que abre o `stuff` (com a chave de máquina) e o `clionkey`. A
+  chave do link do telão (`labs:read`) viaja na URL e baixava o `conf` de toda
+  imagem do glob. Rota nova que entrega segredo de imagem por `?tk=` confere o
+  `kind` antes do glob, e o SSE pede `machines:read` ou `roster:read`.
 - Os mapas em memória do processo (`keyusage`, `presence`, `ratelimit`) valem
   entre testes: `conftest.data_root` zera os dois primeiros; teste que mexe em
   limite de taxa chama `ratelimit.reset()`.

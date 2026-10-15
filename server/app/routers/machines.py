@@ -559,6 +559,11 @@ async def unlock_one(
     return await _lock(image, [m.normalize_mac(mac)], False, p.name)
 
 
+# A chave só de roster é uma classe prevista (`routers/images.py`), e o fluxo
+# leva `machine.bound`/`unbound`; quem lê máquinas lê o resto
+ESCOPOS_DO_FLUXO = ("machines:read", "roster:read")
+
+
 @router.get("/site-images/{image}/events")
 async def events(image: str, request: Request, tk: str = Query("")) -> StreamingResponse:
     """Fluxo SSE para o painel do laboratório (sem recarregar a página).
@@ -577,6 +582,10 @@ async def events(image: str, request: Request, tk: str = Query("")) -> Streaming
 
         # EventSource não recebe cookie: não renova (ver auth.principal_de_link)
         p = sessions.resolve(request.cookies.get(sessions.COOKIE, ""), renovar=False)
+    if p is not None and p.kind == "service" and not p.scopes.intersection(ESCOPOS_DO_FLUXO):
+        # o fluxo leva MAC, status e comando de cada máquina: a chave do telão
+        # (`labs:read`, só agregados) entrava aqui com escopo nenhum
+        raise erro(403, "insufficient_scope", "o fluxo pede machines:read ou roster:read")
     if p is not None and p.kind == "service" and not p.can_see_image(image):
         raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
     if not p or not p.can_see_image(image):

@@ -289,6 +289,35 @@ def test_o_conf_nao_sai_sem_credencial(client, data_root, sede):
     assert client.get("/api/v1/site-images/sala1/usb/conf?tk=nb3i_errado").status_code == 401
 
 
+@pytest.mark.parametrize(
+    "escopos,globs,follow",
+    [
+        (["labs:read"], [], "admin"),  # o link do telão que segue a visão: cobre tudo
+        (["labs:read"], ["sala*"], ""),
+        (["machines:read", "commands:write", "roster:read", "webhooks:write"], ["sala1"], ""),
+    ],
+)
+def test_chave_de_servico_nao_baixa_nada_do_pendrive(build, genusb, client, data_root, sede, escopos, globs, follow):
+    """A chave do link do telão (`labs:read`, na URL) baixava o `conf` de toda
+    imagem do glob, com a chave de boot, e a chave de boot abre o `stuff` e a
+    licença do CLion. Nenhum escopo dá o pendrive."""
+    from server.app.services import keys
+
+    asyncio.run(usb.gerar_da_sala("sala1"))
+    chave = keys.servico_criar("telao", escopos, globs, follow)["key"]
+    for rota in (
+        "/api/v1/site-images/sala1/usb/conf",
+        "/api/v1/site-images/sala1/usb/image",
+        "/api/v1/site-images/sala1/usb/installer/image",
+        "/api/v1/usb/generic/image?id=sala1",
+    ):
+        for jeito in ({"params": {"tk": chave}}, {"headers": {"Authorization": f"Bearer {chave}"}}):
+            r = client.get(rota, **jeito)
+            assert r.status_code == 403, (rota, jeito, r.status_code)
+            assert r.json()["code"] == "insufficient_scope"
+            assert sede["boot_key"] not in r.text
+
+
 def test_baixar_a_imagem_da_sala(build, genusb, client, data_root, sede):
     import gzip
 

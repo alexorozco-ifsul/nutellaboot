@@ -805,10 +805,12 @@ chegar comando ou estourar o tempo. O agente usa `wait=25`.
 
 | Método | Caminho | Cred. | Resposta |
 |---|---|---|---|
-| GET | `/api/v1/site-images/{img}/events?tk=<token>` | C, I, S | fluxo `text/event-stream` |
+| GET | `/api/v1/site-images/{img}/events?tk=<token>` | C, I, S`machines:read` ou `roster:read` | fluxo `text/event-stream` |
 
-O token vai na query porque `EventSource` não permite cabeçalhos. Formato de
-cada evento:
+O token vai na query porque `EventSource` não permite cabeçalhos. A chave de
+serviço precisa de `machines:read` ou de `roster:read`: o fluxo leva MAC,
+status e comando de cada máquina, e a chave do telão (`labs:read`, só
+agregados) recebe **403** `insufficient_scope`. Formato de cada evento:
 
 ```
 event: machine.locked
@@ -851,6 +853,12 @@ lista, que é o que lhes dá prioridade no overlayfs.
 | GET | `/api/v1/site-images/{img}/usb/image` | C, I, `?tk=` | — | **302** para o `.img.gz` no servidor de arquivos, ou a imagem compactada aqui |
 | GET | `/api/v1/site-images/{img}/usb/installer/image` | C, I, `?tk=` | — | o pendrive de instalação, compactado aqui (ele não é publicado) |
 | GET | `/api/v1/usb/generic/image` | C, `?id=&tk=` | — | idem, para a genérica |
+
+**Chave de serviço não baixa nada do pendrive**, com escopo nenhum: as quatro
+rotas de download respondem **403** `insufficient_scope` a ela, antes de olhar
+a imagem. O `conf` e as imagens da sala levam a chave de boot, que abre o
+`stuff` (com a chave de máquina) e a licença do CLion, e a chave do link do
+telão viaja na URL.
 
 **O pendrive de instalação** é o da sala com duas entradas a mais no menu do
 GRUB: instalar no disco inteiro (apaga o disco) e instalar ao lado do Windows
