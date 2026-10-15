@@ -261,7 +261,7 @@ O padrão do menu continua sendo o boot normal.
 | Entrada | Linha do kernel | O que acontece |
 |---|---|---|
 | INSTALAR no disco inteiro | `nb3install=disco` | apaga o disco e o transforma num pendrive |
-| INSTALAR ao lado do Windows | `nb3install=lado` | só no UEFI; nenhuma partição muda |
+| INSTALAR ao lado do Windows ou Linux | `nb3install=lado` | só no UEFI; nenhuma partição muda |
 
 A lógica está em `client/stuff/27-install.sh`, que roda dentro do
 `nb3_mountroot` depois das checagens de VM e de RAM. Sem a flag, ela não faz
@@ -285,8 +285,11 @@ fim - 4 GB     p3  swap "NB3SWAP"
 
 1. **Escolha do disco.** O instalador escolhe um disco interno: SSD/NVMe
    antes de HD. Nunca escolhe disco USB, removível ou aquele de onde o boot
-   veio. Com dois do mesmo tipo, mostra a lista e não apaga nada; o técnico
-   aperta `e` no menu e acrescenta `nb3disk=NOME` à linha do kernel.
+   veio. Com dois do mesmo tipo, não decide sozinho: a tela CHOOSE lista os
+   discos, com o que há em cada um, e o técnico digita o nome. É a mesma
+   leitura com prazo da confirmação, e o YES ainda vem na tela seguinte.
+   `nb3disk=NOME` na linha do kernel escolhe direto; um nome que não serve
+   leva à mesma tela.
 2. **Confirmação.** Uma tela mostra o disco (modelo, tamanho, o que existe
    nele) e o que fica no lugar: os tamanhos da partição de boot, do sistema e
    do swap, e a entrada do firmware. Só a palavra YES, digitada, instala. NO
@@ -304,8 +307,11 @@ fim - 4 GB     p3  swap "NB3SWAP"
    - formata a ext4 pelo deslocamento no disco inteiro, e o swap por um loop
      sobre o pedaço dele. Assim nada depende de o kernel reler a tabela.
 4. **Firmware e reinício.** Em UEFI, a entrada "Maratona Linux" vai para o
-   firmware em primeiro lugar. A máquina reinicia, e o primeiro boot pelo
-   disco já confere a instalação.
+   firmware em primeiro lugar. Saem as entradas que apontavam para partições
+   do disco apagado (o Windows Boot Manager, o ubuntu), que não bootam mais
+   nada. Elas são reconhecidas pelo GUID da partição, ou pela assinatura do
+   MBR, lidos antes de apagar; as de outros discos ficam. A máquina reinicia,
+   e o primeiro boot pelo disco já confere a instalação.
 
 Daí em diante o boot do disco é o do pendrive. O initrd acha a NB3CFG (agora
 num disco interno, e por isso não mostra a faixa "pode retirar"). A
@@ -315,10 +321,14 @@ reset apaga o sistema baixado e mantém a partição de boot. O tamanho do swap
 muda com `nb3swap=<GB>` na linha do kernel (0 é sem swap). O MBR limita a
 instalação aos primeiros 2 TiB do disco.
 
-### Ao lado do Windows (só UEFI)
+### Ao lado do Windows ou de outro Linux (só UEFI)
 
 - **Partições:** nenhuma muda. O sistema usa a partição que o boot de sempre
-  escolheria, a NTFS ou ext4 com 30 GB livres.
+  escolheria, a NTFS ou ext4 com 30 GB livres, e a ext4 vem antes. Numa
+  máquina com Windows e Linux, os 30 GB ficam na partição do Linux. Raiz em
+  btrfs (o padrão do Fedora), criptografada (LUKS) ou em XFS não serve: sem
+  outra partição, o instalador para na tela NO DISK sem mexer em nada, e só
+  o disco inteiro resolve.
 - **Confirmação:** a tela mostra a ESP e a partição do sistema (o disco, o
   tamanho e o espaço livre de cada uma) e o que vai para cada uma. Só o YES
   digitado instala, como no disco inteiro, e antes do download.
@@ -338,18 +348,26 @@ instalação aos primeiros 2 TiB do disco.
   a chave de boot exige instalar de novo, como exige regravar o pendrive.
 - **Autoatualização:** com `NB_DISKBOOT` ela troca o par em
   `nutellaboot/boot/` por `mv`, no mesmo disco onde o conferiu.
-- **Menu:** o "Maratona Linux" é o padrão, e a última entrada é "Windows" (o
-  `bootmgfw.efi`), com 10 s para escolher.
+- **Menu:** o "Maratona Linux" é o padrão, com 10 s para escolher. Depois
+  vêm o "Windows" (o `bootmgfw.efi`) e um item para cada Linux da ESP, com o
+  nome da pasta dele (`EFI/ubuntu`). O item chama o mesmo arquivo que a
+  entrada do firmware da distribuição: o `shimx64.efi`, ou o `grubx64.efi`
+  (no openSUSE `shim.efi`/`grub.efi`; o `systemd-bootx64.efi`). Pasta sem
+  carregador conhecido fica de fora, e o sistema dela continua no menu de
+  boot do firmware.
 - **Remover o NutellaBoot:** desfaz tudo: a entrada do firmware,
-  `\EFI\nutellaboot\` e `nutellaboot/`. O Windows volta a ser o padrão,
-  exatamente como estava.
-- **O que o Windows impõe:**
+  `\EFI\nutellaboot\` e `nutellaboot/`. O sistema que era o padrão antes
+  volta a ser, exatamente como estava.
+- **O que os outros sistemas impõem:**
   - o Secure Boot tem de estar desligado, como no pendrive;
   - com BitLocker, mudar a cadeia de boot faz o Windows pedir a chave de
     recuperação;
   - uma atualização do Windows pode pôr o Windows de volta em primeiro na
-    ordem do firmware, e rodar o instalador de novo corrige.
-- **BIOS legado:** não instala ao lado; seria reescrever o MBR do Windows.
+    ordem do firmware. A do GRUB do Ubuntu e do Debian também (o
+    `grub-install` se põe em primeiro); a do Fedora não. Rodar o instalador
+    de novo corrige, sem apagar nada.
+- **BIOS legado:** não instala ao lado; seria reescrever o MBR do outro
+  sistema.
 
 ### Um GRUB só, e a partição de onde ele bootou
 
@@ -358,7 +376,7 @@ três lugares, e procura nesta ordem:
 1. o `nutellaboot.conf` na raiz de uma partição (o pendrive, ou a p1 do disco
    inteiro);
 2. o rótulo `NB3CFG`;
-3. o menu na pasta `EFI/nutellaboot` da ESP (ao lado do Windows).
+3. o menu na pasta `EFI/nutellaboot` da ESP (ao lado de outro sistema).
 
 Nada disso usa o `$cmdpath`, porque numa imagem standalone ele chega vazio
 (visto em VM).

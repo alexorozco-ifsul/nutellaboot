@@ -319,7 +319,7 @@
   "usb_generic_image": "Imagen genérica de la memoria USB",
   "usb_installer": "memoria USB de instalación",
   "usb_installer_or": "para que la máquina arranque sin memoria USB",
-  "usb_installer_help": "la de esta sala con dos entradas más en el menú: instalar en todo el disco, o junto a Windows (solo UEFI)",
+  "usb_installer_help": "la de esta sala con dos entradas más en el menú: instalar en todo el disco, o junto a Windows o Linux (solo UEFI)",
   "usb_installer_warn": "Instalar en todo el disco BORRA el disco de la máquina. El arranque normal es la opción predeterminada del menú: la instalación solo empieza si alguien la elige, y la pantalla muestra el disco y lo que se hará y solo sigue cuando alguien escribe YES.",
   "usb_help": "Las máquinas arrancan desde una memoria USB. Grabe la imagen una vez y use la misma memoria en todas — se libera al inicio del arranque.",
   "usb_howto": "Grabe la imagen en la memoria y copie nutellaboot.conf dentro (es una partición FAT común, se abre en cualquier computadora).",

@@ -194,7 +194,7 @@ nb_part_interna() {
     [ "$(cat "${_upi_p%/*}/removable" 2> /dev/null)" = 0 ]
 }
 
-# De onde veio este boot: `rede`, `lado` (instalado ao lado do Windows),
+# De onde veio este boot: `rede`, `lado` (instalado ao lado de outro sistema),
 # `disco` (instalado no disco inteiro: a NB3CFG num disco interno) ou `usb`.
 # A autoatualização e o factory reset fazem coisas diferentes em cada um.
 nb_boot_origem() {
@@ -229,7 +229,7 @@ nb_usb_update() {
     fi
 
     # o pendrive, a NB3CFG do disco instalado inteiro, ou o par em
-    # nutellaboot/boot/ quando instalado ao lado do Windows
+    # nutellaboot/boot/ quando instalado ao lado de outro sistema
     _uu_origem=$(nb_boot_origem)
     if [ "$_uu_origem" = usb ]; then
         nb_warn "this USB drive is out of date (${NB_INITRD_BUILD} -> ${NB_USB_BUILD})"

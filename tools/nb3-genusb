@@ -50,7 +50,8 @@ Uso: nb3-genusb [opções]
       --size MB            tamanho da imagem (padrão: 400)
       --no-bios            só EFI (dispensa o grub-mkimage i386-pc)
       --installer          pendrive de instalação: o menu ganha "instalar no
-                           disco inteiro" e "instalar ao lado do Windows"
+                           disco inteiro" e "instalar ao lado do Windows ou
+                           Linux"
                            (o padrão continua sendo o boot normal)
       --publish            envia a imagem pronta para o servidor de arquivos
 EOF
@@ -248,8 +249,8 @@ EOF
 # O pendrive de instalação é o da sede com duas entradas a mais, e NENHUMA é o
 # padrão: o técnico escolhe no menu, e o instalador ainda mostra o disco e o
 # que vai ser feito e só segue com o YES digitado. Um pendrive errado não apaga
-# nada sozinho. Ao lado do Windows só existe no UEFI: no BIOS seria reescrever
-# o MBR dele.
+# nada sozinho. Ao lado de outro sistema só existe no UEFI: no BIOS seria
+# reescrever o MBR dele.
 if [ "$INSTALLER" = 1 ]; then
     cat >> "$WORK/grub.cfg" << EOF
 menuentry "INSTALAR no disco inteiro — APAGA O DISCO (install on the whole disk, ERASES IT)" {
@@ -257,7 +258,7 @@ menuentry "INSTALAR no disco inteiro — APAGA O DISCO (install on the whole dis
 	initrd /initrd.img
 }
 if [ "\$grub_platform" = "efi" ]; then
-	menuentry "INSTALAR ao lado do Windows (install next to Windows, UEFI)" {
+	menuentry "INSTALAR ao lado do Windows ou Linux (install next to Windows or Linux, UEFI)" {
 		linux /vmlinuz $CMDLINE_BASE nb3install=lado nb3cfg=\$nb3uuid
 		initrd /initrd.img
 	}
@@ -388,7 +389,7 @@ echo
 echo "pronto: $OUT"
 echo "  modo:      ${IMAGEROOT:-genérico (defina IMAGEROOT em nutellaboot.conf)}"
 if [ "$INSTALLER" = 1 ]; then
-    echo "  instalador: o menu tem 'INSTALAR no disco inteiro' e 'ao lado do Windows'"
+    echo "  instalador: o menu tem 'INSTALAR no disco inteiro' e 'ao lado do Windows ou Linux'"
 fi
 if [ -n "$FULLNAME" ]; then
     echo "  sede:      $FULLNAME"

@@ -854,7 +854,7 @@ lista, que é o que lhes dá prioridade no overlayfs.
 
 **O pendrive de instalação** é o da sala com duas entradas a mais no menu do
 GRUB: instalar no disco inteiro (apaga o disco) e instalar ao lado do Windows
-(só UEFI). O padrão do menu continua sendo o boot normal. Ele sai só sob
+ou Linux (só UEFI). O padrão do menu continua sendo o boot normal. Ele sai só sob
 demanda e não vai para o servidor de arquivos. Quem instala não lê nada dele
 depois do conf: a rota `/boot/v3/{img}/install` aponta a imagem do pendrive
 da sede, que o instalador baixa, confere e grava. Imagem de antes do

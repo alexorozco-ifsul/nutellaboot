@@ -12,10 +12,12 @@
 #          UEFI), e o resto ganha uma ext4 (p2, NB3DATA) e um swap (p3,
 #          NB3SWAP). APAGA O DISCO. Daí em diante o boot do disco é o do
 #          pendrive, inclusive a autoatualização (25-usbupdate.sh);
-#   lado   ao lado do Windows, só no UEFI, sem mexer em partição nenhuma. O
-#          GRUB, o menu, o conf e o wifi.conf vão para \EFI\nutellaboot\ da ESP
-#          (sem letra no Windows: a chave de boot não fica em C:\), e o par
-#          kernel+initrd para nutellaboot/boot/, na partição que o boot já usa.
+#   lado   ao lado do Windows ou de outro Linux, só no UEFI, sem mexer em
+#          partição nenhuma. O GRUB, o menu, o conf e o wifi.conf vão para
+#          \EFI\nutellaboot\ da ESP (sem letra no Windows: a chave de boot não
+#          fica em C:\), e o par kernel+initrd para nutellaboot/boot/, na
+#          partição que o boot já usa. O menu chama também os outros sistemas
+#          da ESP, pelo mesmo carregador da entrada do firmware deles.
 #          O GRUB entrega ao initrd um cpio a mais (nb3conf.cpio) com o conf,
 #          o wifi.conf e o marcador nb3-disco, que liga o NB_DISKBOOT do
 #          bootstrap.
@@ -102,8 +104,8 @@ nb_inst_prereq() {
         nb_fatal_screen "NO UEFI" \
             "!This computer started in legacy BIOS mode." \
             "" \
-            "Installing next to Windows needs UEFI: in BIOS mode it would" \
-            "overwrite the Windows boot code. Nothing was changed." \
+            "Installing next to another system needs UEFI: in BIOS mode it" \
+            "would overwrite that system's boot code. Nothing was changed." \
             "" \
             "!What to do:" \
             "  -> keep starting this computer from the USB drive, or" \
@@ -303,39 +305,71 @@ nb_inst_escolhe() {
     return 1
 }
 
+# A lista de discos para as telas. $2 é quantos cabem (o orçamento é de 25
+# linhas, console VGA texto); com $3 = 1, os que podem receber a instalação
+# ganham uma linha com o que há neles, para quem escolhe saber qual é qual.
 nb_inst_tabela_discos() {
     _itd_n=0
     while read -r _itd_d _itd_q _itd_s _itd_m; do
         [ -n "$_itd_d" ] || continue
         _itd_n=$((_itd_n + 1))
-        # o orçamento é de 25 linhas (console VGA texto)
-        if [ "$_itd_n" -gt 5 ]; then
+        if [ "$_itd_n" -gt "${2:-5}" ]; then
             nb_ui_dim "    ... and more"
             break
         fi
+        _itd_c=
         case "$_itd_q" in
-            ssd) _itd_q="SSD" ;;
-            hd) _itd_q="HD" ;;
+            ssd) _itd_q="SSD" _itd_c=${3:-} ;;
+            hd) _itd_q="HD" _itd_c=${3:-} ;;
             installer) _itd_q="this installer" ;;
             small) _itd_q="too small" ;;
         esac
         nb_ui_dim "$(printf '    %-10s %-15s %8s  %s' "$_itd_d" "$_itd_q" "$(nb_inst_tamanho "$_itd_s")" "$_itd_m")"
+        if [ "$_itd_c" = 1 ]; then
+            nb_ui_dim "$(printf '      has: %.62s' "$(nb_inst_resumo "$_itd_d")")"
+        fi
     done < "$1"
     [ "$_itd_n" = 0 ] && nb_ui_dim "    (no disk was detected)"
 }
 
+# O que há num disco, numa linha: "ntfs 300 GB Windows, ext4 170 GB ubuntu".
+# Só as partições de 1 GB ou mais, que são as dos sistemas: a ESP e a
+# reservada do Windows empurrariam o rótulo que importa para fora da linha.
+nb_inst_resumo() {
+    _irm_r=
+    _irm_n=0
+    for _irm_p in "$NB_INST_SYS_BLOCK/$1/$1"*; do
+        [ -e "$_irm_p/partition" ] || continue
+        _irm_n=$((_irm_n + 1))
+        _irm_s=$(cat "$_irm_p/size" 2> /dev/null)
+        [ "${_irm_s:-0}" -ge 2097152 ] || continue
+        _irm_b=${_irm_p##*/}
+        _irm_t=$(blkid -o value -s TYPE "$NB_INST_DEV/$_irm_b" 2> /dev/null)
+        _irm_l=$(blkid -o value -s LABEL "$NB_INST_DEV/$_irm_b" 2> /dev/null)
+        _irm_i="${_irm_t:-?} $(nb_inst_tamanho "$_irm_s")"
+        [ -n "$_irm_l" ] && _irm_i="$_irm_i $_irm_l"
+        _irm_r="${_irm_r:+$_irm_r, }$_irm_i"
+    done
+    if [ -n "$_irm_r" ]; then
+        printf '%s' "$_irm_r"
+    elif [ "$_irm_n" -gt 0 ]; then
+        printf 'only small partitions'
+    else
+        printf 'no partitions'
+    fi
+}
+
+# Nenhum disco pode receber a instalação: não há o que escolher.
 nb_inst_sem_disco_screen() {
     nb_screen "DISK?" \
-        "!No disk was chosen for the installation. Nothing was erased." \
+        "!No disk on this computer can take Maratona Linux. Nothing was erased." \
         "" \
         "!Disks on this computer:"
     nb_inst_tabela_discos "$1"
     printf '\n'
     nb_ui_text "What to do:"
-    nb_ui_dim "  -> two disks of the same kind: press 'e' in the boot menu and"
-    nb_ui_dim "     add nb3disk=NAME to the linux line, NAME from the list above"
-    nb_ui_dim "  -> no SSD or HD in the list: this computer cannot be installed"
-    nb_ui_dim "     (the disk must be internal and have room for the system)"
+    nb_ui_dim "  -> the disk must be internal (not USB) and have room for the system"
+    nb_ui_dim "  -> with no disk like that, keep starting from the USB drive"
     _isd_w=$(nb_screen_wait)
     printf '\n'
     nb_ui_text "This machine will restart in ${_isd_w} seconds."
@@ -369,12 +403,14 @@ nb_inst_conteudo() {
 # A segunda confirmação (a primeira é a escolha no menu do GRUB): a tela diz
 # o que vai ser feito e onde, e só a palavra YES, inteira e em qualquer caixa,
 # instala. NO cancela; linha vazia ou outra coisa redesenha a tela e pergunta
-# de novo. É a segunda exceção da invariante 5, ao lado do hold do seed: só
+# de novo. A escolha do disco, num empate, é a mesma pergunta com outra
+# resposta. É a segunda exceção da invariante 5, ao lado do hold do seed: só
 # existe com nb3install=, que só uma entrada fora do padrão do menu do
 # pendrive de instalação põe, e o prazo é um só (NB_INST_ASK_WAIT): sem
-# resposta, nada muda e a máquina reinicia. Volta 0 no YES; senão,
-# NB_INST_MOTIVO diz por quê. Um console que não abre também cancela.
-# $1 a função que desenha a tela; o resto vai para ela, depois da marca de erro
+# resposta, nada muda e a máquina reinicia. Volta 0 quando a resposta vale;
+# senão, NB_INST_MOTIVO diz por quê. Um console que não abre também cancela.
+# $1 a função que desenha a tela, $2 a que julga a resposta (0 vale, 1
+# cancela, 2 pergunta de novo); o resto vai para as duas
 nb_inst_pergunta() {
     NB_INST_MOTIVO=teclado
     nb_inst_responde "$@" < "$NB_INST_TTY"
@@ -382,7 +418,8 @@ nb_inst_pergunta() {
 
 nb_inst_responde() {
     _irs_tela=$1
-    shift
+    _irs_julga=$2
+    shift 2
     # o que foi digitado antes de a tela aparecer (um ENTER a mais enquanto o
     # boot subia a rede, por exemplo) não responde por ninguém
     _irs_n=0
@@ -407,18 +444,47 @@ nb_inst_responde() {
             fi
             return 1
         fi
-        case "$NB_INST_LIDO" in
-            [Yy][Ee][Ss])
+        "$_irs_julga" "$NB_INST_LIDO" "$@"
+        case $? in
+            0)
                 NB_INST_MOTIVO=
                 return 0
                 ;;
-            [Nn] | [Nn][Oo])
+            1)
                 NB_INST_MOTIVO=no
                 return 1
                 ;;
         esac
         _irs_erro=1
     done
+}
+
+# YES instala, NO cancela, o resto pergunta de novo.
+nb_inst_sim() {
+    case "$1" in
+        [Yy][Ee][Ss]) return 0 ;;
+        [Nn] | [Nn][Oo]) return 1 ;;
+    esac
+    return 2
+}
+
+# A escolha: o nome de um disco da lista que pode receber a instalação, com
+# ou sem /dev/ e em qualquer caixa; fica em NB_INST_ESCOLHA. NO cancela.
+# $1 a resposta, $2 a lista do nb_inst_discos
+nb_inst_qual() {
+    _iql_d=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    _iql_d=${_iql_d#/dev/}
+    case "$_iql_d" in
+        n | no) return 1 ;;
+        "" | *[!a-z0-9]*) return 2 ;;
+    esac
+    case "$(awk -v d="$_iql_d" '$1 == d {print $2}' "$2")" in
+        ssd | hd)
+            NB_INST_ESCOLHA=$_iql_d
+            return 0
+            ;;
+    esac
+    return 2
 }
 
 # A única leitura de teclado do instalador, e sempre com prazo (a guarda da
@@ -428,9 +494,10 @@ nb_inst_le() {
     read -r -t "$1" NB_INST_LIDO
 }
 
-# O pé das duas telas da pergunta. $1 = 1 depois de uma resposta que não
-# vale; $2 o que o YES faz.
-nb_inst_tela_pergunta() {
+# O pé das telas da pergunta. $1 = 1 depois de uma resposta que não vale;
+# $2 o que responder, $3 o aviso da resposta que não vale, $4 (opcional) uma
+# linha a mais
+nb_inst_tela_pe() {
     _itp_w=${NB_INST_ASK_WAIT:-600}
     if [ "$_itp_w" -ge 120 ]; then
         _itp_w="$((_itp_w / 60)) minutes"
@@ -438,12 +505,39 @@ nb_inst_tela_pergunta() {
         _itp_w="$_itp_w seconds"
     fi
     printf '\n'
-    nb_ui_text "Type YES and press Enter $2. NO cancels."
+    nb_ui_text "$2"
+    [ -n "${4:-}" ] && nb_ui_dim "$4"
     nb_ui_dim "No answer in $_itp_w: nothing changes and this computer restarts."
     if [ "$1" = 1 ]; then
-        nb_ui_text "Only the whole word YES installs: type YES or NO."
+        nb_ui_text "$3"
     fi
     printf '  > '
+}
+
+# O pé das telas do YES. $2 o que o YES faz.
+nb_inst_tela_pergunta() {
+    nb_inst_tela_pe "$1" "Type YES and press Enter $2. NO cancels." \
+        "Only the whole word YES installs: type YES or NO."
+}
+
+# A escolha do disco, quando mais de um pode receber a instalação (o empate do
+# nb_inst_escolhe) ou o nb3disk= não serve. Os que podem vêm primeiro, cada um
+# com o que há nele. $1 marca de erro, $2 a lista do nb_inst_discos
+nb_inst_tela_escolha() {
+    if [ -n "${nb3disk:-}" ]; then
+        _ich_t=$(printf '!nb3disk=%.16s cannot take Maratona Linux. Nothing was erased yet.' "$nb3disk")
+    else
+        _ich_t="!More than one disk can take Maratona Linux. Nothing was erased yet."
+    fi
+    nb_screen "CHOOSE" "$_ich_t" ""
+    {
+        awk '$2 == "ssd" || $2 == "hd"' "$2"
+        awk '$2 != "ssd" && $2 != "hd"' "$2"
+    } > "$NB_INST_TMP/discos-escolha"
+    nb_inst_tabela_discos "$NB_INST_TMP/discos-escolha" 4 1
+    nb_inst_tela_pe "$1" "Type the NAME of the disk to install on. NO cancels." \
+        "Type a NAME marked SSD or HD in the list above, or NO." \
+        "The next screen shows that disk again and asks YES before erasing."
 }
 
 # Não volta. Nada foi gravado: o disco, a ESP e o firmware só mudam depois do
@@ -631,10 +725,20 @@ nb_inst_disco() {
     _iad_min=$((_iad_isect + _iad_swap + NB_MIN_FREE_KB * 2 + ${NB_INST_MARGEM:-2097152}))
     mkdir -p "$NB_INST_TMP"
     nb_inst_discos "$_iad_min" > "$NB_INST_TMP/discos"
-    _iad_d=$(nb_inst_escolhe "$NB_INST_TMP/discos") ||
-        nb_inst_sem_disco_screen "$NB_INST_TMP/discos"
-    nb_inst_pergunta nb_inst_tela_disco "$_iad_d" "$NB_INST_TMP/discos" "$_iad_isect" "$_iad_swap" ||
+    _iad_d=$(nb_inst_escolhe "$NB_INST_TMP/discos")
+    if [ -z "$_iad_d" ]; then
+        # empate, ou um nb3disk= que não serve: quem está na frente escolhe
+        _iad_n=$(awk '$2 == "ssd" || $2 == "hd" {n++} END {print n + 0}' "$NB_INST_TMP/discos")
+        [ "$_iad_n" -gt 0 ] || nb_inst_sem_disco_screen "$NB_INST_TMP/discos"
+        nb_inst_pergunta nb_inst_tela_escolha nb_inst_qual "$NB_INST_TMP/discos" ||
+            nb_inst_cancelada disco
+        _iad_d=$NB_INST_ESCOLHA
+    fi
+    nb_inst_pergunta nb_inst_tela_disco nb_inst_sim "$_iad_d" "$NB_INST_TMP/discos" "$_iad_isect" "$_iad_swap" ||
         nb_inst_cancelada disco
+    # antes de apagar: depois não há mais como saber para onde apontavam as
+    # entradas do firmware dos sistemas deste disco
+    nb_inst_ids_do_disco "$_iad_d" > "$NB_INST_TMP/ids"
     nb_inst_baixa
     _iad_p1=$(nb_inst_p1 "$NB_INST_IMG")
     [ -n "$_iad_p1" ] || nb_inst_falhou "the installer file has no boot partition"
@@ -644,14 +748,19 @@ nb_inst_disco() {
     nb_inst_grava "$NB_INST_DEV/$_iad_d" "$NB_INST_IMG" "$_iad_p1" "$_iad_swap" ||
         nb_inst_falhou "writing to /dev/$_iad_d failed"
     _iad_efi=
+    _iad_orf=
     if [ -d "$NB_INST_EFI" ]; then
         if nb_inst_efi_entrada "$NB_INST_DEV/$_iad_d" 1 '\EFI\BOOT\BOOTX64.EFI'; then
             _iad_efi="The firmware got a boot entry named '$NB_INST_LABEL'."
         else
             _iad_efi="The firmware refused the boot entry: if the disk does not start, pick it in the boot menu (F12)."
         fi
+        nb_inst_efi_orfas "$NB_INST_TMP/ids"
+        if [ -n "$NB_INST_ORFAS" ]; then
+            _iad_orf=$(printf 'Old firmware entries removed: %.45s.' "$NB_INST_ORFAS")
+        fi
     fi
-    nb_inst_fim "The whole disk /dev/$_iad_d is now Maratona Linux." "$_iad_efi"
+    nb_inst_fim "The whole disk /dev/$_iad_d is now Maratona Linux." "$_iad_efi" "$_iad_orf"
 }
 
 # --- firmware (UEFI) ---
@@ -671,6 +780,65 @@ nb_inst_efi_nossas() {
     _ien_t=$(printf '\t')
     efibootmgr 2> /dev/null |
         sed -n "s/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} $NB_INST_LABEL\($_ien_t.*\)\{0,1\}\$/\1/p"
+}
+
+# Para onde as entradas do firmware dos sistemas deste disco apontam: os GUIDs
+# das partições (GPT) ou a assinatura (MBR), esta com e sem os zeros à
+# esquerda, porque o formato do efibootmgr mudou entre versões. A assinatura
+# zero é a das imagens do nb3-genusb, a mesma do pendrive: essa não serve para
+# reconhecer nada.
+nb_inst_ids_do_disco() {
+    for _iix_p in "$NB_INST_SYS_BLOCK/$1/$1"*; do
+        [ -e "$_iix_p/partition" ] || continue
+        _iix_u=$(blkid -p -o value -s PART_ENTRY_UUID "$NB_INST_DEV/${_iix_p##*/}" 2> /dev/null)
+        case "$_iix_u" in
+            ????????-????-????-????-????????????) printf '%s\n' "$_iix_u" ;;
+        esac
+    done
+    if [ "$(blkid -p -o value -s PTTYPE "$NB_INST_DEV/$1" 2> /dev/null)" = dos ]; then
+        _iix_s=$(blkid -p -o value -s PTUUID "$NB_INST_DEV/$1" 2> /dev/null)
+        case "$_iix_s" in
+            "" | *[!0-9a-fA-F]* | 00000000) ;;
+            *) printf '0x%x\n0x%s\n' "0x$_iix_s" "$_iix_s" ;;
+        esac
+    fi
+    return 0
+}
+
+# Depois de gravar o disco inteiro: as entradas do firmware que apontavam para
+# partições dele (o Windows Boot Manager, o ubuntu) não bootam mais nada. Só
+# elas saem, reconhecidas pelo GUID ou pela assinatura lidos antes de apagar,
+# inteiros: depois de uma vírgula e antes de vírgula ou parêntese, como no
+# HD(1,GPT,<guid>,0x800,...) do efibootmgr -v. A nossa fica mesmo que case. Os rótulos removidos ficam em NB_INST_ORFAS, separados por
+# vírgula.
+# $1 o arquivo do nb_inst_ids_do_disco
+nb_inst_efi_orfas() {
+    NB_INST_ORFAS=
+    [ -s "$1" ] || return 0
+    _ieo_m=
+    nb_inst_efivars && _ieo_m=1
+    efibootmgr -v 2> /dev/null | awk -v ids="$(tr '\n' ' ' < "$1")" -v nosso="$NB_INST_LABEL" '
+        BEGIN { n = split(tolower(ids), id, " ") }
+        /^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]/ {
+            rot = $0
+            sub(/^Boot[0-9A-Fa-f]+\*? /, "", rot)
+            sub(/\t.*/, "", rot)
+            if (rot == nosso) next
+            l = tolower($0)
+            for (i = 1; i <= n; i++)
+                if (index(l, "," id[i] ",") || index(l, "," id[i] ")")) {
+                    print substr($0, 5, 4) " " rot
+                    break
+                }
+        }' > "$NB_INST_TMP/orfas"
+    while read -r _ieo_n _ieo_l; do
+        if efibootmgr -q -b "$_ieo_n" -B > /dev/null 2>&1; then
+            nb_log "removed the firmware entry '$_ieo_l' of the erased disk"
+            NB_INST_ORFAS="${NB_INST_ORFAS:+$NB_INST_ORFAS, }$_ieo_l"
+        fi
+    done < "$NB_INST_TMP/orfas"
+    [ -n "$_ieo_m" ] && umount "$NB_INST_EFI/efivars" 2> /dev/null
+    return 0
 }
 
 # A entrada do firmware, criada ANTES de reiniciar; `efibootmgr -c` a põe em
@@ -777,14 +945,15 @@ nb_inst_zeros() {
 # O menu da ESP. A linha do kernel é a do pendrive (nb3-genusb, CMDLINE_BASE;
 # há teste que confere as duas); o conf, o wifi.conf e o marcador vão para o
 # initrd no nb3conf.cpio.
-# $1 UUID da partição do sistema, $2 = 1 quando a ESP tem o Windows
+# $1 UUID da partição do sistema, $2 = 1 quando a ESP tem o Windows, $3 o
+# arquivo do nb_inst_sistemas (os outros sistemas, um item cada)
 nb_inst_grubcfg_lado() {
     _igl_base="boot=nutellaboot noresume pcie_aspm=off net.ifnames=0 IMAGEROOT=$IMAGEROOT NB_SERVER=$NB_SERVER"
     # shellcheck disable=SC2016
     _igl_extra='$nb3esp/nb3conf.cpio'
     cat << EOF
 # Gerado pelo instalador do NutellaBoot (client/stuff/27-install.sh): Maratona
-# Linux ao lado do Windows. O GRUB e este menu moram na pasta EFI/nutellaboot
+# Linux ao lado de outro sistema. O GRUB e este menu moram na pasta EFI/nutellaboot
 # da ESP; o kernel e o initrd, em nutellaboot/boot/ na partição do sistema.
 set timeout=10
 set default=0
@@ -832,8 +1001,18 @@ menuentry "Windows" {
 }
 EOF
     fi
+    if [ -s "${3:-}" ]; then
+        while read -r _igl_n _igl_c; do
+            cat << EOF
+menuentry "$_igl_n" {
+	search --no-floppy --file --set=nb3os $_igl_c
+	chainloader (\$nb3os)$_igl_c
+}
+EOF
+        done < "$3"
+    fi
     cat << EOF
-menuentry "Remover o NutellaBoot deste computador (o Windows volta a ser o padrão)" {
+menuentry "Remover o NutellaBoot deste computador (o sistema de antes volta a ser o padrão)" {
 	linux (\$nb3stor)/nutellaboot/boot/vmlinuz $_igl_base factoryreset=y
 	initrd (\$nb3stor)/nutellaboot/boot/initrd.img $_igl_extra
 }
@@ -844,7 +1023,7 @@ nb_inst_sem_esp_screen() {
     nb_fatal_screen "NO ESP" \
         "!This disk has no EFI system partition. Nothing was changed." \
         "" \
-        "Windows on this computer starts in legacy BIOS mode, so there" \
+        "The system on this computer starts in legacy BIOS mode, so there" \
         "is no place for a UEFI boot entry next to it." \
         "" \
         "!What to do:" \
@@ -862,6 +1041,50 @@ nb_inst_sem_espaco_screen() {
         "!What to do:" \
         "  -> keep starting this computer from the USB drive, or" \
         "  -> choose 'install on the whole disk' (it ERASES the disk)"
+}
+
+# Os outros sistemas das ESPs internas, para o menu: uma linha "nome caminho"
+# por pasta de EFI/ com um carregador conhecido. O caminho é o mesmo que a
+# entrada do firmware da distribuição chama (o shim antes do GRUB). O Windows
+# tem item próprio; o caminho reserva (EFI/Boot) e a nossa pasta ficam de
+# fora, e nome fora de [A-Za-z0-9._-] também, porque vai entre aspas no
+# grub.cfg. A FAT não difere maiúscula de minúscula, nem o GRUB nela.
+nb_inst_sistemas() {
+    mkdir -p "$NB_INST_ESPMNT"
+    for _isi_b in $(nb_inst_esps); do
+        mount -t vfat -o ro "$NB_INST_DEV/$_isi_b" "$NB_INST_ESPMNT" 2> /dev/null || continue
+        for _isi_d in "$NB_INST_ESPMNT"/EFI/*/; do
+            [ -d "$_isi_d" ] || continue
+            _isi_n=${_isi_d%/}
+            _isi_n=${_isi_n##*/}
+            case "$(printf '%s' "$_isi_n" | tr 'A-Z' 'a-z')" in
+                boot | microsoft | nutellaboot) continue ;;
+            esac
+            case "$_isi_n" in "" | *[!A-Za-z0-9._-]*) continue ;; esac
+            for _isi_f in shimx64.efi grubx64.efi shim.efi grub.efi systemd-bootx64.efi; do
+                if [ -f "$_isi_d$_isi_f" ]; then
+                    printf '%s /EFI/%s/%s\n' "$_isi_n" "$_isi_n" "$_isi_f"
+                    break
+                fi
+            done
+        done
+        umount "$NB_INST_ESPMNT" 2> /dev/null
+    done | awk '!visto[tolower($1)]++'
+}
+
+# Quem mais o menu do Maratona chama, para as telas.
+# $1 = 1 com o Windows, $2 o arquivo do nb_inst_sistemas
+nb_inst_frase_menu() {
+    _ifm_l=
+    [ "$1" = 1 ] && _ifm_l=Windows
+    if [ -s "$2" ]; then
+        _ifm_l="${_ifm_l:+$_ifm_l, }$(awk '{printf "%s%s", (NR > 1 ? ", " : ""), $1}' "$2")"
+    fi
+    if [ -n "$_ifm_l" ]; then
+        printf 'The Maratona boot menu also starts: %.36s.' "$_ifm_l"
+    else
+        printf 'The other systems stay in the firmware boot menu.'
+    fi
 }
 
 # A ESP escolhida, lida antes da pergunta e só para leitura: o espaço livre
@@ -899,15 +1122,16 @@ nb_inst_linha_disco() {
     nb_ui_dim "    (disk /dev/$1: $(nb_inst_modelo "$NB_INST_SYS_BLOCK/$1"), $(nb_inst_tamanho "${_ild_s:-0}"))"
 }
 
-# A tela da pergunta ao lado do Windows. $1 marca de erro, $2 a ESP, $3 a
-# partição do sistema, $4 o livre nela (KB). O resto vem do nb_inst_esp_info.
+# A tela da pergunta ao lado de outro sistema. $1 marca de erro, $2 a ESP, $3
+# a partição do sistema, $4 o livre nela (KB), $5 o arquivo do
+# nb_inst_sistemas. O resto vem do nb_inst_esp_info.
 nb_inst_tela_lado() {
     nb_screen "CONFIRM" \
-        "!Install Maratona Linux NEXT TO WINDOWS. Nothing is erased." \
+        "!Install Maratona Linux NEXT TO THE SYSTEMS ALREADY HERE. Nothing is erased." \
         "" \
         "!The boot loader goes to the EFI system partition (EFI/nutellaboot):"
     nb_inst_linha_part "$2" "$NB_INST_ESPLIVRE"
-    nb_ui_text "The kernel goes next to the system files (nutellaboot/boot):"
+    nb_ui_text "The kernel and the system (about $(((NB_MIN_FREE_KB + 1048575) / 1048576)) GB) go to the folder nutellaboot on:"
     nb_inst_linha_part "$3" "$4"
     _itl_d1=$(nb_inst_disco_de "$2")
     _itl_d2=$(nb_inst_disco_de "$3")
@@ -917,11 +1141,7 @@ nb_inst_tela_lado() {
     fi
     printf '\n'
     nb_ui_dim "The firmware gets the boot entry '$NB_INST_LABEL', first in the order."
-    if [ -n "$NB_INST_ESPWIN" ]; then
-        nb_ui_dim "Windows stays: it is in the Maratona boot menu."
-    else
-        nb_ui_dim "The other systems stay in the firmware boot menu."
-    fi
+    nb_ui_dim "$(nb_inst_frase_menu "$NB_INST_ESPWIN" "$5")"
     if [ -n "$NB_INST_ESPVELHO" ]; then
         nb_ui_dim "The Maratona boot loader already there is replaced."
     fi
@@ -942,8 +1162,11 @@ nb_inst_lado() {
     _ila_esp=$(nb_inst_acha_esp "$_ila_part")
     [ -n "$_ila_esp" ] || nb_inst_sem_esp_screen
     nb_inst_esp_info "$_ila_esp"
+    mkdir -p "$NB_INST_TMP"
+    nb_inst_sistemas > "$NB_INST_TMP/sistemas"
     _ila_sislivre=$(df -Pk "$BLOCKROOT" 2> /dev/null | awk 'END {print $4}')
-    if ! nb_inst_pergunta nb_inst_tela_lado "$_ila_esp" "$_ila_part" "$_ila_sislivre"; then
+    if ! nb_inst_pergunta nb_inst_tela_lado nb_inst_sim "$_ila_esp" "$_ila_part" "$_ila_sislivre" \
+        "$NB_INST_TMP/sistemas"; then
         umount "$BLOCKROOT" 2> /dev/null
         nb_inst_cancelada lado
     fi
@@ -979,7 +1202,7 @@ nb_inst_lado() {
             nb_inst_falhou "could not write $_ila_f to $_ila_part"
     done
     # é por este arquivo que o GRUB acha a partição se o UUID dela mudar
-    echo "NutellaBoot 3 - instalado ao lado do Windows" > "$STORAGEDIR/boot/nb3-disco"
+    echo "NutellaBoot 3 - instalado ao lado de outro sistema" > "$STORAGEDIR/boot/nb3-disco"
 
     mkdir -p "$_ila_dir"
     cp "$NB_INST_IMGMNT/EFI/BOOT/BOOTX64.EFI" "$_ila_dir/grubx64.efi" &&
@@ -992,7 +1215,7 @@ nb_inst_lado() {
     else
         cp "$NB_INST_IMGMNT/wifi.conf" "$_ila_dir/wifi.conf"
     fi
-    echo "NutellaBoot 3 - instalado ao lado do Windows" > "$_ila_dir/nb3-disco"
+    echo "NutellaBoot 3 - instalado ao lado de outro sistema" > "$_ila_dir/nb3-disco"
     nb_inst_cpio "$_ila_dir/nb3conf.cpio" \
         nutellaboot.conf "$_ila_dir/nutellaboot.conf" \
         wifi.conf "$_ila_dir/wifi.conf" \
@@ -1001,7 +1224,8 @@ nb_inst_lado() {
     _ila_win=
     [ -f "$NB_INST_ESPMNT/EFI/Microsoft/Boot/bootmgfw.efi" ] && _ila_win=1
     nb_inst_grubcfg_lado "$(blkid -o value -s UUID "$_ila_part" 2> /dev/null)" "$_ila_win" \
-        > "$_ila_dir/grub.cfg" || nb_inst_falhou "could not write to the EFI system partition"
+        "$NB_INST_TMP/sistemas" > "$_ila_dir/grub.cfg" ||
+        nb_inst_falhou "could not write to the EFI system partition"
     sync
     umount "$NB_INST_IMGMNT" 2> /dev/null
     losetup -d "$_ila_loop" 2> /dev/null
@@ -1012,7 +1236,7 @@ nb_inst_lado() {
     _ila_num=$(cat "$NB_SYS_CLASS_BLOCK/$_ila_esp/partition" 2> /dev/null)
     nb_inst_efi_entrada "$NB_INST_DEV/$_ila_disco" "$_ila_num" '\EFI\nutellaboot\grubx64.efi' ||
         nb_inst_falhou "the firmware refused the boot entry"
-    nb_inst_fim "Windows stays: it is in the Maratona boot menu." \
+    nb_inst_fim "$(nb_inst_frase_menu "$_ila_win" "$NB_INST_TMP/sistemas")" \
         "The firmware got a boot entry named '$NB_INST_LABEL', now the first."
 }
 
@@ -1041,12 +1265,17 @@ nb_inst_desinstala() {
 
 # --- fim ---
 
+# $1 o que foi feito; $2 e $3, linhas a mais, só se tiverem texto
 nb_inst_fim() {
+    _ifi_2=${2:-}
+    _ifi_3=${3:-}
+    set -- "$1"
+    [ -n "$_ifi_2" ] && set -- "$@" "$_ifi_2"
+    [ -n "$_ifi_3" ] && set -- "$@" "$_ifi_3"
     nb_screen "DONE" \
         "!Maratona Linux was installed on this computer." \
         "" \
-        "$1" \
-        "${2:-}" \
+        "$@" \
         "" \
         "!Remove the USB drive now." \
         "From the next start on, this computer starts from its own disk" \

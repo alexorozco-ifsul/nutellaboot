@@ -72,9 +72,10 @@ UMOUNT = """echo "umount $*" >> "$ACOES"
 [ -L "$1" ] && { rm -f "$1"; mkdir -p "$1"; }
 exit 0
 """
-# sem argumento lista as entradas (o arquivo do teste); o resto só anota
+# sem argumento ou com -v lista as entradas (o arquivo do teste); o resto só
+# anota
 EFIBOOTMGR = """echo "efibootmgr $*" >> "$ACOES"
-[ $# -eq 0 ] && cat "$EFILISTA" 2>/dev/null
+case "$*" in "" | -v) cat "$EFILISTA" 2>/dev/null ;; esac
 exit 0
 """
 # `blkid ... -s CHAVE DISPOSITIVO` lê o arquivo <dispositivo>.<CHAVE>
@@ -497,6 +498,13 @@ def test_instala_no_disco_inteiro_de_ponta_a_ponta(maq, tmp_path):
     assert acoes.rstrip().endswith("REBOOT")
 
 
+def test_a_tela_done_nao_deixa_linha_vazia_a_mais(maq):
+    r = maq.roda("nb_inst_fim 'Feito.' '' ''")
+    assert "Feito.\n  \n  Remove the USB drive now." in r.stdout, r.stdout
+    r = maq.roda("nb_inst_fim 'Feito.' 'Dois.' 'Tres.'")
+    assert "Feito.\n  Dois.\n  Tres.\n  \n  Remove" in r.stdout, r.stdout
+
+
 def test_no_bios_nao_mexe_no_firmware(maq, tmp_path):
     r, disco = _instala_disco(maq, tmp_path, NB_INST_EFI=tmp_path / "sem-efi")
     assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
@@ -537,19 +545,79 @@ def test_md5_errado_nao_toca_no_disco(maq, tmp_path):
     assert disco.read_bytes() == b"\0" * disco.stat().st_size
 
 
-def test_empate_mostra_os_discos_e_nao_apaga(maq, tmp_path):
+def _empate(maq, tmp_path, resposta, **env):
+    """Dois SSDs: o sda com Windows e o nvme0n1 vazio, e o pendrive USB (sdb)."""
     img = imagem_da_sede(tmp_path / "sala1-abc.img")
     maq.servir(img)
-    a = maq.disco("sda", 256 * MiB, arquivo=True)
-    b = maq.disco("nvme0n1", 256 * MiB, arquivo=True)
+    a = maq.disco("sda", 256 * MiB, arquivo=True, modelo="Kingston A400",
+                  partes=[("sda1", 200 * MiB, {"TYPE": "ntfs", "LABEL": "Windows"})])
+    b = maq.disco("nvme0n1", 256 * MiB, arquivo=True, modelo="Samsung 980")
+    maq.teclado.write_text(resposta)
+    script = env.pop("antes", "") + (
+        f'NB_CFG_DEV="{_pendrive_usb(maq)}"; nb3install=disco; nb3swap=0; nb_install; echo NAO-VOLTA'
+    )
+    r = maq.roda(script, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0", **env)
+    return r, a, b
+
+
+def test_empate_pergunta_qual_disco(maq, tmp_path):
+    """Dois discos do mesmo tipo: a tela lista os dois, com o que há em cada
+    um, e quem está na frente digita o nome. A tela do YES vem depois, para o
+    disco escolhido."""
+    r, a, b = _empate(maq, tmp_path, "nvme0n1\nyes\n")
+    tela = r.stdout
+    assert "=== CHOOSE ===" in tela, tela + r.stderr
+    assert "More than one disk can take Maratona Linux" in tela
+    assert "has: only small partitions" in tela and "has: no partitions" in tela
+    assert "this installer" in tela
+    assert tela.index("=== CHOOSE ===") < tela.index("=== ERASE? ===")
+    assert "/dev/nvme0n1   SSD" in tela
+    assert "=== DONE ===" in tela
+    assert _zerado(a), "apagou o disco que não foi escolhido"
+    assert [x["type"] for x in _particoes(b)] == ["ef", "83"]
+
+
+def test_empate_no_cancela_sem_apagar(maq, tmp_path):
+    r, a, b = _empate(maq, tmp_path, "no\n")
+    assert "=== CHOOSE ===" in r.stdout and "=== STOPPED ===" in r.stdout, r.stdout + r.stderr
+    assert "=== ERASE? ===" not in r.stdout
+    assert _zerado(a) and _zerado(b)
+
+
+def test_empate_so_aceita_disco_que_pode(maq, tmp_path):
+    """O pendrive (sdb), um nome que não existe e lixo perguntam de novo; o
+    nome vale com /dev/ e em qualquer caixa."""
+    r, a, b = _empate(maq, tmp_path, "sdb\nsdz\nsda;rm\n/DEV/SDA\nyes\n")
+    assert r.stdout.count("=== CHOOSE ===") == 4, r.stdout + r.stderr
+    assert r.stdout.count("Type a NAME marked SSD or HD") == 3
+    assert "/dev/sda   SSD" in r.stdout and "=== DONE ===" in r.stdout
+    assert _zerado(b)
+    assert [x["type"] for x in _particoes(a)] == ["ef", "83"]
+
+
+def test_nb3disk_que_nao_serve_pergunta(maq, tmp_path):
+    """Um nb3disk= digitado errado no GRUB não para a instalação: a tela diz
+    isso e pergunta."""
+    r, a, b = _empate(maq, tmp_path, "sda\nno\n", antes="nb3disk=sdb; ")
+    assert "nb3disk=sdb cannot take Maratona Linux" in r.stdout, r.stdout + r.stderr
+    assert "=== ERASE? ===" in r.stdout and "=== STOPPED ===" in r.stdout
+    assert _zerado(a) and _zerado(b)
+
+
+def test_sem_disco_que_sirva_nao_pergunta(maq, tmp_path):
+    """Só o pendrive e um disco pequeno: não há o que escolher."""
+    img = imagem_da_sede(tmp_path / "sala1-abc.img")
+    maq.servir(img)
+    maq.disco("sda", 8 * MiB)
     r = maq.roda(
         f'NB_CFG_DEV="{_pendrive_usb(maq)}"; nb3install=disco; nb3swap=0; nb_install',
         NB_MIN_FREE_KB="1024",
         NB_INST_MARGEM="0",
     )
-    assert "=== DISK? ===" in r.stdout and "nb3disk=" in r.stdout, r.stdout
-    for d in (a, b):
-        assert d.read_bytes() == b"\0" * d.stat().st_size
+    assert "=== DISK? ===" in r.stdout and "No disk on this computer can take" in r.stdout, r.stdout
+    assert "too small" in r.stdout
+    assert "=== CHOOSE ===" not in r.stdout
+    assert "REBOOT" in maq.acoes_texto()
 
 
 # --- a pergunta ---
@@ -771,13 +839,14 @@ def test_o_menu_da_esp_e_grub_valido(maq, tmp_path):
     check = shutil.which("grub2-script-check") or shutil.which("grub-script-check")
     if not check:
         pytest.skip("sem grub-script-check")
-    for windows, uuid in ((1, "1A2B3C4D5E6F7A8B"), ("", "")):
-        r = maq.roda(f'nb_inst_grubcfg_lado "{uuid}" "{windows}" > cfg')
+    (maq.tmp / "sistemas").write_text("ubuntu /EFI/ubuntu/shimx64.efi\nfedora /EFI/fedora/grubx64.efi\n")
+    for windows, uuid, sistemas in ((1, "1A2B3C4D5E6F7A8B", ""), ("", "", ""), (1, "", "sistemas"), ("", "", "sistemas")):
+        r = maq.roda(f'nb_inst_grubcfg_lado "{uuid}" "{windows}" "{sistemas}" > cfg')
         assert r.returncode == 0, r.stderr
         cfg = maq.tmp / "cfg"
         p = subprocess.run([check, str(cfg)], capture_output=True, text=True)
         assert p.returncode == 0, p.stderr + cfg.read_text()
-        assert ("chainloader" in cfg.read_text()) == bool(windows)
+        assert cfg.read_text().count("chainloader") == bool(windows) + (2 if sistemas else 0)
 
 
 def test_a_linha_do_kernel_e_a_do_pendrive():
@@ -789,6 +858,57 @@ def test_a_linha_do_kernel_e_a_do_pendrive():
     genusb = re.search(r'^CMDLINE_BASE="([^"]+)"', GENUSB.read_text(), re.M).group(1)
     stuff = re.search(r'_igl_base="([^"]+)"', (STUFF / "27-install.sh").read_text()).group(1)
     assert stuff.startswith(genusb + " "), (genusb, stuff)
+
+
+def test_ao_lado_poe_os_outros_sistemas_no_menu(maq, tmp_path):
+    """Dual boot: o menu do Maratona chama o Windows e cada Linux da ESP, pelo
+    mesmo arquivo da entrada do firmware dele (o shim antes do GRUB). Pasta sem
+    carregador conhecido, a do caminho reserva e nome que não cabe entre aspas
+    ficam de fora."""
+    esp, sistema = _maquina_com_windows(maq, tmp_path)
+    for pasta, arquivos in (("ubuntu", ("shimx64.efi", "grubx64.efi")), ("fedora", ("grubx64.efi",)),
+                            ("HP", ("tools.efi",)), ('nome "estranho"', ("grubx64.efi",))):
+        d = esp / "EFI" / pasta
+        d.mkdir(parents=True)
+        for a in arquivos:
+            (d / a).write_bytes(b"efi")
+    r = maq.roda(LADO.format(pendrive=_pendrive_usb(maq), tmp=maq.tmp, dev=maq.dev))
+    assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
+    # na CONFIRM e na DONE
+    assert r.stdout.count("The Maratona boot menu also starts: Windows, fedora, ubuntu.") == 2, r.stdout
+    cfg = (esp / "EFI" / "nutellaboot" / "grub.cfg").read_text()
+    assert 'menuentry "ubuntu" {' in cfg
+    assert "search --no-floppy --file --set=nb3os /EFI/ubuntu/shimx64.efi" in cfg
+    assert "chainloader ($nb3os)/EFI/ubuntu/shimx64.efi" in cfg
+    assert "chainloader ($nb3os)/EFI/fedora/grubx64.efi" in cfg
+    assert "HP" not in cfg and "estranho" not in cfg and "/EFI/Boot/" not in cfg
+    # Maratona, Windows, os outros, e o Remover por último
+    ordem = [cfg.index(x) for x in ('menuentry "Maratona Linux', 'menuentry "Windows"',
+                                    'menuentry "fedora"', 'menuentry "ubuntu"', 'menuentry "Remover')]
+    assert ordem == sorted(ordem), cfg
+    # nada das outras pastas mudou
+    assert (esp / "EFI" / "ubuntu" / "shimx64.efi").read_bytes() == b"efi"
+
+
+def test_ao_lado_de_um_linux_sozinho(maq, tmp_path):
+    """Sem Windows: o menu chama o Linux, e o Remover não promete o Windows."""
+    esp, sistema = _maquina_com_windows(maq, tmp_path, com_windows=False)
+    (esp / "EFI" / "debian").mkdir(parents=True)
+    (esp / "EFI" / "debian" / "grubx64.efi").write_bytes(b"efi")
+    r = maq.roda(LADO.format(pendrive=_pendrive_usb(maq), tmp=maq.tmp, dev=maq.dev))
+    assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
+    assert "NEXT TO THE SYSTEMS ALREADY HERE" in r.stdout
+    assert "The Maratona boot menu also starts: debian." in r.stdout
+    cfg = (esp / "EFI" / "nutellaboot" / "grub.cfg").read_text()
+    assert 'menuentry "Windows"' not in cfg and 'menuentry "debian"' in cfg
+    assert "Windows" not in cfg.split('menuentry "Remover')[1].split("\n")[0]
+
+
+def test_sem_outro_sistema_a_tela_manda_ao_firmware(maq):
+    (maq.tmp / "vazio").write_text("")
+    r = maq.roda('nb_inst_frase_menu "" vazio; echo; nb_inst_frase_menu 1 vazio')
+    assert r.stdout.splitlines() == ["The other systems stay in the firmware boot menu.",
+                                     "The Maratona boot menu also starts: Windows."]
 
 
 def test_ao_lado_sem_esp_nao_muda_nada(maq, tmp_path):
@@ -819,7 +939,8 @@ def test_ao_lado_a_tela_mostra_onde_e_no_nao_muda_nada(maq, tmp_path):
     assert "EFI system partition (EFI/nutellaboot)" in tela
     assert "sda1" in tela and "vfat" in tela and "sda2" in tela and "ntfs" in tela
     assert "(disk /dev/sda: Disco de Teste, 500 GB)" in tela
-    assert "Windows stays" in tela and "already there" not in tela
+    assert "The Maratona boot menu also starts: Windows." in tela
+    assert "already there" not in tela
     assert "Type YES and press Enter to install" in tela
     assert "=== STOPPED ===" in tela and "the answer was NO" in tela
     assert "nb3disk" not in tela
@@ -870,9 +991,71 @@ def test_factory_reset_ao_lado_desinstala(maq, tmp_path):
         'NB_DISKBOOT=1; factoryreset=y; BLOCKROOT=x; STORAGEDIR=x/nutellaboot; '
         "nutella_findblock() { :; }; runpremountconfigs; echo NAO"
     )
-    assert "Windows starts on the next boot" in r.stdout, r.stdout
+    assert "the next boot starts the system" in r.stdout, r.stdout
     assert not (esp / "EFI" / "nutellaboot").exists()
     assert "NAO" not in r.stdout
+
+
+# --- disco inteiro: as entradas do firmware que morrem com o disco ---
+
+GUID_ESP = "599d7084-6c71-45fe-a749-4a91bd97c5eb"
+GUID_OUTRO = "11111111-2222-3333-4444-555555555555"
+
+
+def test_disco_inteiro_tira_do_firmware_so_as_entradas_do_disco_apagado(maq, tmp_path):
+    """O Windows Boot Manager e o ubuntu apontavam para a ESP do disco que foi
+    apagado: saem. A entrada de outro disco e a do shell do firmware ficam."""
+    script, disco = _cena_disco(maq, tmp_path)
+    (maq.blkid / "sda1.PART_ENTRY_UUID").write_text(GUID_ESP + "\n")
+    maq.efilista.write_text(
+        "BootCurrent: 0001\nBootOrder: 0001,0002,0004,0005\n"
+        f"Boot0001* Windows Boot Manager\tHD(1,GPT,{GUID_ESP},0x800,0x32000)/\\EFI\\Microsoft\\Boot\\bootmgfw.efi\n"
+        f"Boot0002* ubuntu\tHD(1,GPT,{GUID_ESP.upper()},0x800,0x32000)/\\EFI\\ubuntu\\shimx64.efi\n"
+        f"Boot0004* Outro disco\tHD(1,GPT,{GUID_OUTRO},0x800,0x32000)/\\EFI\\BOOT\\BOOTX64.EFI\n"
+        "Boot0005* UEFI Shell\tFvVol(7cb8bdc9-f8eb-4f34-aaea-3ee4af6516a1)/FvFile(7c04a583-9e3e-4f1c-ad65-e05268d0b4d1)\n"
+    )
+    r = maq.roda(script, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0")
+    assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
+    acoes = maq.acoes_texto()
+    assert "efibootmgr -q -b 0001 -B" in acoes and "efibootmgr -q -b 0002 -B" in acoes
+    assert "-b 0004" not in acoes and "-b 0005" not in acoes
+    assert "Old firmware entries removed: Windows Boot Manager, ubuntu." in r.stdout
+
+
+def test_disco_mbr_reconhece_pela_assinatura(maq, tmp_path):
+    """No MBR a entrada leva a assinatura do disco, sem zeros à esquerda; a
+    comparação é inteira (0x1abcd não pega 0x1abcde)."""
+    script, disco = _cena_disco(maq, tmp_path)
+    (maq.blkid / "sda.PTTYPE").write_text("dos\n")
+    (maq.blkid / "sda.PTUUID").write_text("0001abcd\n")
+    maq.efilista.write_text(
+        "Boot0001* ubuntu\tHD(1,MBR,0x1abcd,0x800,0x32000)/\\EFI\\ubuntu\\shimx64.efi\n"
+        "Boot0002* outro\tHD(1,MBR,0x1abcde,0x800,0x32000)/\\EFI\\x\\a.efi\n"
+        "Boot0003* com zeros\tHD(2,MBR,0x0001abcd,0x800,0x32000)/\\EFI\\y\\b.efi\n"
+        f"Boot0006* sem o tamanho\tHD(1,GPT,{GUID_OUTRO})/\\EFI\\z\\c.efi\n"
+    )
+    (maq.blkid / "sda1.PART_ENTRY_UUID").write_text(GUID_OUTRO + "\n")
+    r = maq.roda(script, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0")
+    assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
+    acoes = maq.acoes_texto()
+    assert "efibootmgr -q -b 0001 -B" in acoes and "-b 0002" not in acoes
+    # a assinatura com zeros e o GUID antes do parêntese também valem
+    assert "efibootmgr -q -b 0003 -B" in acoes and "efibootmgr -q -b 0006 -B" in acoes
+
+
+def test_os_ids_do_disco(maq):
+    """Só GUID de verdade, e a assinatura zero (a das imagens do nb3-genusb, a
+    mesma do pendrive) não conta."""
+    maq.disco("sda", 256 * MiB, partes=[("sda1", 100 * MiB, {"PART_ENTRY_UUID": GUID_ESP}),
+                                        ("sda2", 100 * MiB, {"PART_ENTRY_UUID": "81c4f136-02"})])
+    (maq.blkid / "sda.PTTYPE").write_text("dos\n")
+    (maq.blkid / "sda.PTUUID").write_text("00000000\n")
+    assert maq.roda("nb_inst_ids_do_disco sda").stdout.split() == [GUID_ESP]
+    (maq.blkid / "sda.PTUUID").write_text("81c4f136\n")
+    assert maq.roda("nb_inst_ids_do_disco sda").stdout.split() == [GUID_ESP, "0x81c4f136", "0x81c4f136"]
+    # com zeros à esquerda saem as duas formas
+    (maq.blkid / "sda.PTUUID").write_text("0001abcd\n")
+    assert maq.roda("nb_inst_ids_do_disco sda").stdout.split() == [GUID_ESP, "0x1abcd", "0x0001abcd"]
 
 
 # --- de onde veio o boot ---
@@ -956,6 +1139,29 @@ def test_a_desistencia_cabe_na_tela_e_lista_os_discos(maq):
     assert max(len(l) for l in linhas) <= 80, max(linhas, key=len)
     assert "sda" in r.stdout and "nb3disk=NAME" in r.stdout and "... and more" in r.stdout
     assert "REBOOT" in maq.acoes_texto()
+
+
+def test_a_escolha_cabe_na_tela(maq):
+    """O pior caso: cinco discos que podem, com muitas partições, o pendrive e
+    um USB antes deles na lista, e o aviso de resposta errada. Os que podem vêm
+    primeiro: o corte não pode esconder justamente um deles."""
+    for nome in ("sda", "sdb", "sdc", "sdd", "sde", "sdf", "sdg"):
+        partes = [(f"{nome}{i}", 10 * 1024 * MiB, {"TYPE": "ntfs", "LABEL": f"Dados {i}"}) for i in range(1, 6)]
+        maq.disco(nome, 500 * 1024 * MiB, partes=partes)
+    gb = 500 * 1024 * MiB
+    (maq.tmp / "lista").write_text(
+        f"sdb installer {gb} Pendrive\nsdc usb {gb} Outro pendrive\n"
+        f"sda ssd {gb} Samsung SSD 870 EVO 500GB\nsdd ssd {gb} Kingston A400\n"
+        f"sde hd {gb} WDC WD10EZEX-08WN4A0\nsdf ssd {gb} Crucial MX500\nsdg hd {gb} Seagate\n"
+    )
+    maq.inst.mkdir()
+    r = maq.roda("nb_inst_tela_escolha 1 lista", NB_UI_PLAIN="0")
+    linhas = _sem_cor(r.stdout)
+    assert len(linhas) <= MAX_LINHAS, f"a escolha usa {len(linhas)} linhas"
+    assert max(len(l) for l in linhas) <= 80, max(linhas, key=len)
+    for nome in ("sda", "sdd", "sde", "sdf"):
+        assert f"    {nome} " in r.stdout, nome
+    assert "... and more" in r.stdout and "Type a NAME marked SSD or HD" in r.stdout
 
 
 def test_a_recusa_de_disco_cabe_na_tela(maq):

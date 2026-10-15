@@ -397,7 +397,7 @@ se alguém escolher uma das duas:
 | Entrada | O que faz |
 |---|---|
 | **INSTALAR no disco inteiro** | APAGA o disco. A imagem do pendrive vai para o começo dele, e o resto vira a partição do sistema e o swap. BIOS e UEFI |
-| **INSTALAR ao lado do Windows** | Só UEFI, e nenhuma partição muda. O GRUB vai para a partição EFI do Windows; o kernel e o initrd ficam junto do sistema baixado. O Maratona Linux vira o padrão, e o Windows fica no menu por 10 s |
+| **INSTALAR ao lado do Windows ou Linux** | Só UEFI, e nenhuma partição muda. O GRUB vai para a partição EFI; o kernel e o initrd ficam junto do sistema baixado. O Maratona Linux vira o padrão, e o Windows e os outros Linux ficam no menu dele por 10 s |
 
 **Para gerar a imagem:**
 - **no console:** na página da imagem, seção **Pendrive de boot**, item
@@ -425,14 +425,21 @@ NB3_ADMIN_KEY=nb3a_... tools/nb3-genusb --installer \
      próxima máquina;
    - o disco escolhido é interno: SSD/NVMe antes de HD. Nunca é USB,
      removível, nem o pendrive de onde a máquina bootou;
-   - com dois discos do mesmo tipo, nada é apagado: a tela lista os dois. Para
-     escolher, aperte `e` no menu e acrescente `nb3disk=sda` (o nome da lista)
-     ao fim da linha `linux`. `nb3swap=8` muda o swap de 4 para 8 GB, e
-     `nb3swap=0` tira o swap.
-4. **Ao lado do Windows:** a tela mostra a partição EFI e a partição do
-   sistema, e pede o mesmo `YES`. O sistema vai para o espaço livre que o boot
-   de sempre usaria (30 GB numa NTFS ou ext4). As restrições de sempre valem: sem
-   Fast Startup, sem BitLocker nessa partição.
+   - com dois discos do mesmo tipo, a tela `CHOOSE` lista os dois, com o que
+     há em cada um. **Digite o nome do disco** (como `sda`), e a tela seguinte
+     pede o `YES` para ele. Para escolher direto, aperte `e` no menu e
+     acrescente `nb3disk=sda` ao fim da linha `linux`. `nb3swap=8` muda o swap
+     de 4 para 8 GB, e `nb3swap=0` tira o swap;
+   - as entradas do firmware dos sistemas que estavam no disco (Windows Boot
+     Manager, ubuntu) saem junto com ele; as de outros discos ficam.
+4. **Ao lado do Windows ou Linux:** a tela mostra a partição EFI e a partição
+   do sistema, e pede o mesmo `YES`. O sistema vai para o espaço livre que o
+   boot de sempre usaria (30 GB numa NTFS ou ext4, e a ext4 vem antes: numa
+   máquina com Windows e Linux, os 30 GB ficam no Linux). O menu do Maratona
+   ganha um item para o Windows e um para cada Linux da partição EFI. As
+   restrições de sempre valem: sem Fast Startup, sem BitLocker nessa
+   partição. Linux só em btrfs (Fedora), LUKS ou XFS não guarda o sistema:
+   ali, só o disco inteiro.
 5. A máquina mostra `DONE` e reinicia. **Tire o pendrive.** O primeiro boot
    pelo disco baixa o sistema, como o primeiro boot de um pendrive.
 
@@ -440,8 +447,9 @@ NB3_ADMIN_KEY=nb3a_... tools/nb3-genusb --installer \
 - **Atualização:** o disco se atualiza como o pendrive. O kernel e o initrd do
   modelo são regravados no disco quando o servidor muda de par.
 - **"Remover o NutellaBoot deste computador" (factory reset):**
-  - ao lado do Windows, desfaz tudo (entrada do firmware, `\EFI\nutellaboot\`,
-    `nutellaboot/`), e o Windows volta a ser o padrão;
+  - ao lado de outro sistema, desfaz tudo (entrada do firmware,
+    `\EFI\nutellaboot\`, `nutellaboot/`), e o sistema de antes volta a ser
+    o padrão;
   - no disco inteiro, apaga o sistema baixado e mantém a partição de boot: o
     próximo boot baixa tudo de novo.
 
@@ -452,9 +460,9 @@ NB3_ADMIN_KEY=nb3a_... tools/nb3-genusb --installer \
   Windows sem avisar.
 - **BitLocker:** mudar a cadeia de boot faz o Windows pedir a chave de
   recuperação no próximo boot dele. Tenha a chave em mãos.
-- **Atualização do Windows:** pode pôr o Windows em primeiro na ordem do
-  firmware. Rodar o instalador de novo (ao lado do Windows) corrige, sem
-  apagar nada.
+- **Atualização do Windows, ou do GRUB do Ubuntu/Debian:** pode pôr o outro
+  sistema em primeiro na ordem do firmware (a do Fedora não faz isso). Rodar o
+  instalador de novo (ao lado) corrige, sem apagar nada.
 - **Pendrive gerado antes do instalador:** para numa tela `TOO OLD`, sem tocar
   em nada. Reconstrua o initrd (abaixo) e gere a imagem de novo.
 

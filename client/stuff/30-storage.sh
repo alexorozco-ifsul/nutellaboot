@@ -188,8 +188,8 @@ runpremountconfigs() {
     if [ "$factoryreset" = y ]; then
         nutella_findblock
         # Instalado no disco (27-install.sh) não há pendrive para tirar: ao
-        # lado do Windows a remoção desfaz a entrada do firmware e a pasta da
-        # ESP, e no disco inteiro a partição de boot fica (o disco é do
+        # lado de outro sistema a remoção desfaz a entrada do firmware e a pasta
+        # da ESP, e no disco inteiro a partição de boot fica (o disco é do
         # Maratona Linux) e o sistema desce de novo.
         case "$(nb_boot_origem)" in
             lado)
@@ -198,8 +198,9 @@ runpremountconfigs() {
                     "!NutellaBoot has been removed from this computer." \
                     "" \
                     "The downloaded system, the persistent home, the swap file" \
-                    "and the boot entry were all deleted. Windows and your own" \
-                    "files were not touched: Windows starts on the next boot." \
+                    "and the boot entry were all deleted. Your other systems and" \
+                    "files were not touched: the next boot starts the system" \
+                    "that was the default before." \
                     "" \
                     "!What to do:" \
                     "  -> nothing; to install it again, use the installer USB drive"

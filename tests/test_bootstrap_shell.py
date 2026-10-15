@@ -422,8 +422,8 @@ def test_o_instalador_le_o_teclado_num_lugar_so_e_com_prazo():
             recuo = len(l) - len(l.lstrip())
             done = next(x for x in linhas[i + 1:] if x.strip().startswith("done")
                         and len(x) - len(x.lstrip()) == recuo)
-            if re.search(r"<\s*\"?\$[1-9]\b", done) and "TTY" not in done:
-                continue  # a lista de discos, de um arquivo
+            if re.search(r"<\s*\S", done) and not re.search(r"<\s*(?:/dev/|\"?\$\{?\w*TTY)", done):
+                continue  # lê de arquivo (a lista de discos, as entradas do firmware)
         leituras.append(s)
     assert leituras == ['read -r -t "$1" NB_INST_LIDO'], leituras
     assert "NB_INST_TTY=${NB_INST_TTY:-/dev/console}" in codigo

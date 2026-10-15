@@ -23,7 +23,7 @@ NB_CFG_BYLABEL=${NB_CFG_BYLABEL:-/dev/disk/by-label/NB3CFG}
 # nutellaboot.conf como um arquivo a mais no initrd — no iPXE,
 # `initrd nutellaboot.conf /nutellaboot.conf`.
 NB_NETCONF=${NB_NETCONF:-/nutellaboot.conf}
-# Instalado ao lado do Windows (27-install.sh, modo `lado`): o GRUB da ESP
+# Instalado ao lado de outro sistema (27-install.sh, modo `lado`): o GRUB da ESP
 # entrega o conf do mesmo jeito, e junto o wifi.conf e este marcador. É o
 # marcador que diz que o boot veio do disco e não da rede.
 NB_DISKMARK=${NB_DISKMARK:-/nb3-disco}
@@ -211,7 +211,7 @@ nb_read_usbpartition() {
     fi
 }
 
-# Instalado ao lado do Windows: não há pendrive nem NB3CFG para procurar, e o
+# Instalado ao lado de outro sistema: não há pendrive nem NB3CFG para procurar, e o
 # boot também não é pela rede. Quem diz isso é o marcador que o GRUB entregou,
 # nunca a cmdline (invariante 9).
 nb_read_diskconfig() {
