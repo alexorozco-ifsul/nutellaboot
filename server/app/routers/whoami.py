@@ -47,14 +47,14 @@ async def set_quotas(owner_id: str, body: dict, p=Depends(auth.require_admin)) -
     if not owners.is_owner_id(owner_id):
         raise HTTPException(400, "identificador de dono inválido")
     campos = {}
-    for k in ("max_models", "max_images", "build_quota"):
+    for k in ("max_models", "max_images", "build_quota", "max_service_keys"):
         if k in body:
             try:
                 campos[k] = max(0, int(body[k]))
             except (TypeError, ValueError):
                 raise HTTPException(400, f"{k} precisa ser um número")
     if not campos:
-        raise HTTPException(400, "informe max_models, max_images ou build_quota")
+        raise HTTPException(400, "informe max_models, max_images, build_quota ou max_service_keys")
     if invites.set_fields(owners.code_of(owner_id), campos) is None:
         raise HTTPException(404, "convite deste sub-admin não existe mais")
     return {"id": owner_id, "quotas": owners.quotas(owner_id), "usage": owners.usage(owner_id)}

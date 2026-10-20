@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
 
 from .. import auth
+from ..errors import erro
 from ..services import store, usb
 
 router = APIRouter(prefix="/api/v1")
@@ -86,6 +87,7 @@ async def estado_geral(p=Depends(auth.require_admin)) -> dict:
     """Tudo que a seção "Pendrive" do console mostra."""
     return {
         "kernel": usb.kernel_state(),
+        "kernels": usb.kernels(),
         "generic": usb.generic_state(),
         "auto_generate": bool(usb.conf().get("auto_generate", True)),
         "images": [
@@ -93,6 +95,16 @@ async def estado_geral(p=Depends(auth.require_admin)) -> dict:
             for i in store.list_site_images()
         ],
     }
+
+
+@router.get("/usb/kernels")
+async def kernels(p=Depends(auth.require_admin)) -> dict:
+    """Os pares kernel+initrd que o servidor tem, e que modelo usa cada um.
+
+    É o que a página do modelo oferece para escolher, sem o peso do `GET /usb`
+    (que confere o estado do pendrive de cada sede).
+    """
+    return {"kernels": usb.kernels()}
 
 
 @router.post("/usb/generic", status_code=202)
@@ -107,9 +119,11 @@ async def gerar_generica(p=Depends(auth.require_admin)) -> dict:
 @router.get("/site-images/{image}/usb")
 async def estado_da_sala(image: str, p=Depends(auth.require_image_access())) -> dict:
     return {
-        "kernel": usb.kernel_state(),
+        # o par desta sede, que é o do modelo dela
+        "kernel": usb.kernel_state(usb.build_da_sede(image)),
         "generic": usb.generic_state(),
         "image": usb.image_state(image),
+        "installer": usb.instalador_state(image),
     }
 
 
@@ -124,14 +138,37 @@ async def gerar_da_sala(image: str, p=Depends(auth.require_image_access())) -> d
     return usb.image_state(image)
 
 
+@router.post("/site-images/{image}/usb/installer", status_code=202)
+async def gerar_instalador(image: str, p=Depends(auth.require_image_access())) -> dict:
+    """Gera o pendrive de instalação desta sala (instala no disco e apaga o
+    que estiver nele, se o técnico escolher). Quem pode gerar o pendrive da
+    sala pode gerar este: é o mesmo arquivo com duas entradas a mais no menu."""
+    usb.agendar_instalador(image)
+    return usb.instalador_state(image)
+
+
 # --- downloads (o navegador carrega sozinho: não há cabeçalho para mandar) ---
+
+
+def _quem_baixa(request: Request, tk: str, image: str | None):
+    """A credencial de um download do pendrive, que nunca é chave de serviço.
+
+    O `conf` e as imagens da sala levam a chave de boot, e ela abre o `stuff`
+    (com a chave de máquina) e a licença do CLion. A chave do link do telão,
+    que só tem `labs:read` e viaja na URL, baixava o `conf` de toda imagem do
+    glob dela. Nenhum integrador precisa do pendrive: a recusa vale com
+    qualquer escopo, e vem antes de olhar a imagem."""
+    p = auth.principal_de_link(request, tk, image)
+    if p is not None and p.kind == "service":
+        raise erro(403, "insufficient_scope", "o pendrive não sai por chave de serviço, com escopo nenhum")
+    return p
 
 
 @router.get("/site-images/{image}/usb/conf")
 async def baixar_conf(image: str, request: Request, tk: str = Query("")):
     """O `nutellaboot.conf` da sala, para copiar por cima do que está no
     pendrive gravado com a imagem genérica."""
-    p = auth.principal_de_link(request, tk, image)
+    p = _quem_baixa(request, tk, image)
     if p is None or not p.can_see_image(image):
         raise HTTPException(401, "credencial ausente ou inválida")
     if not store.site_image_exists(image):
@@ -144,10 +181,18 @@ async def baixar_conf(image: str, request: Request, tk: str = Query("")):
 
 @router.get("/site-images/{image}/usb/image")
 async def baixar_da_sala(image: str, request: Request, tk: str = Query("")):
-    p = auth.principal_de_link(request, tk, image)
+    p = _quem_baixa(request, tk, image)
     if p is None or not p.can_see_image(image):
         raise HTTPException(401, "credencial ausente ou inválida")
     return _entregar(usb.image_state(image))
+
+
+@router.get("/site-images/{image}/usb/installer/image")
+async def baixar_instalador(image: str, request: Request, tk: str = Query("")):
+    p = _quem_baixa(request, tk, image)
+    if p is None or not p.can_see_image(image):
+        raise HTTPException(401, "credencial ausente ou inválida")
+    return _entregar(usb.instalador_state(image))
 
 
 @router.get("/usb/generic/image")
@@ -160,7 +205,7 @@ async def baixar_generica(request: Request, tk: str = Query(""), id: str = Query
     console vale o cookie; da tela de uma sede, `?id=&tk=`, que é o que ela já
     tem na URL.
     """
-    p = auth.principal_de_link(request, tk, id or None)
+    p = _quem_baixa(request, tk, id or None)
     if p is None:
         raise HTTPException(401, "credencial ausente ou inválida")
     if p.kind == "image" and id and not p.can_see_image(id):

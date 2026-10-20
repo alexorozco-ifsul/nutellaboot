@@ -21,6 +21,8 @@ from ..settings import settings
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 DEFAULT_MAX_IMAGES = 1
 DEFAULT_BUILD_QUOTA = 5
+# chaves de serviço (o MOJ, o telão) que o sub-admin pode criar
+DEFAULT_MAX_SERVICE_KEYS = 5
 # Três grupos = 60 bits de entropia. Os códigos antigos (dois grupos, 40 bits)
 # continuam valendo, mas agora o código é credencial de console de longa
 # duração, não mais um bilhete de uso único — 40 bits é pouco para isso.
@@ -58,6 +60,7 @@ def create(
     max_images: int = DEFAULT_MAX_IMAGES,
     max_models: int = 2,
     build_quota: int = DEFAULT_BUILD_QUOTA,
+    max_service_keys: int = DEFAULT_MAX_SERVICE_KEYS,
     model: str | None = None,
     expires_at: float | None = None,
     note: str = "",
@@ -83,6 +86,7 @@ def create(
                 "max_models": int(max_models),
                 "used_images": [],
                 "build_quota": int(build_quota),
+                "max_service_keys": int(max_service_keys),
                 "model": model,
                 "expires_at": expires_at,
                 "note": note,
@@ -143,6 +147,7 @@ def set_fields(code: str, campos: dict) -> dict | None:
         "max_images",
         "max_models",
         "build_quota",
+        "max_service_keys",
         "expires_at",
         "revoked",
         "model",

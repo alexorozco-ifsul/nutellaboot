@@ -32,10 +32,13 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
 
 5. **Nada de `read` interativo no caminho de boot.** Máquina de prova boota
    sozinha; um prompt esperando ENTER trava a sala inteira. Há um teste que
-   falha se aparecer (`tests/test_bootstrap_shell.py`). Exceção única e
-   sancionada: o hold do modo seed (`50-seed.sh`) — opt-in da sede, `read`
-   com timeout de 1 s e saída desatendida garantida pela liberação remota no
-   configureitor.
+   falha se aparecer (`tests/test_bootstrap_shell.py`). Duas exceções
+   sancionadas, as duas com prazo e saída desatendida: o hold do modo seed
+   (`50-seed.sh`) — opt-in da sede, `read` com timeout de 1 s e liberação
+   remota no configureitor — e a pergunta do instalador (`27-install.sh`,
+   `nb_inst_le`) — só com `nb3install=`, que só uma entrada fora do padrão do
+   menu do pendrive de instalação põe, e sem resposta em 10 min nada muda e a
+   máquina reinicia.
 
 6. **Certificado sempre verificado.** Nada de `--check-certificate=false`. A
    única exceção é `GET /boot/v3/time`, que existe justamente para acertar o
@@ -54,7 +57,12 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
    o carregador (iPXE) põe o conf dentro do initrd, em `/nutellaboot.conf`; o
    initrd não procura a NB3CFG e marca `NB_NETBOOT`, que faz o
    `25-usbupdate.sh` avisar em vez de regravar. Quem liga `NB_NETBOOT` é o
-   arquivo, nunca a cmdline. Há teste.
+   arquivo, nunca a cmdline. Instalado ao lado de outro sistema, o GRUB da ESP
+   entrega do mesmo jeito o conf, o `wifi.conf` e o marcador `/nb3-disco`, que
+   liga `NB_DISKBOOT` (e não o `NB_NETBOOT`): a regravação vai para
+   `nutellaboot/boot/`. Com duas NB3CFG (pendrive numa máquina instalada no
+   disco), vale a do UUID que o GRUB passou em `nb3cfg=`, e o stuff regrava
+   essa (`NB_CFG_DEV`). Há teste.
 
 10. **`/api/v1/images/...` continua respondendo, para sempre.** O agente de
     telemetria (`client/telemetry/usr/share/mlog/agent.sh`) monta
@@ -72,9 +80,11 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     (`services/ownership.py`) **e** para `auth.require_image_access`, que
     devolvia 403 e conferia a existência antes da credencial: eram dois
     oráculos de nomes de sala em ~26 rotas (config, machines, roster, alerts,
-    layers). Chave de serviço é a exceção: quem a emite é a administração,
-    então 403 de escopo/glob ali é o erro útil. Há teste
-    (`tests/test_subadmin.py`).
+    layers). Chave de serviço DA ADMINISTRAÇÃO é a exceção: quem a emite
+    enxerga tudo, então 403 de escopo/glob ali é o erro útil. A chave criada
+    por um sub-admin segue o console dele: imagem de outro dono é 404
+    (`auth.exigir_imagem_do_servico`). Há teste (`tests/test_subadmin.py`,
+    `tests/test_service_keys_subadmin.py`).
 
 12. **As mensagens do caminho de boot são em inglês, e saem pelo
     `client/stuff/05-ui.sh`.** É a única parte do sistema que não é traduzida
@@ -176,12 +186,25 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     são da sede e não se toca. Falha de REDE não conta como tentativa (nada foi
     tocado, e blip de rede não pode condenar máquina); falha de ESCRITA conta, e
     o marcador em `$STORAGEDIR/.usbupd-tried` é o que impede um pendrive
-    protegido contra escrita de reiniciar a máquina para sempre. A identidade
+    protegido contra escrita de reiniciar a máquina para sempre: na segunda
+    vez a máquina segue com o pendrive velho. O marcador e os arquivos baixados
+    só sobrevivem ao reinício porque o `nb_usb_update` monta o disco local
+    antes (`nb_find_storage`/`nb_mount_storage`, do `40-mount.sh`): quem
+    montava era o `mount_layers`, que roda depois, e até 2026-10 tudo ia para a
+    RAM do initrd. O laço só apareceu em VM com o pendrive em readonly; o teste
+    tinha um STORAGEDIR que persistia, e agora modela a RAM e o disco. A identidade
     vem de `tools/nb3-build-initrd`, que carimba `/etc/nutellaboot-build`
     dentro do initrd e o md5 em `client/build/build.json` — o md5 sai da
     ferramenta porque o servidor tem um worker só. Initrd sem carimbo não
     confere nada. Há teste com pendrive de mentira em disco
-    (`tests/test_usb_update.py`).
+    (`tests/test_usb_update.py`). **O par é do MODELO**: `boot_build` escolhe
+    `client/builds/<nome>/` (sem ele, `client/build/`), porque o kernel tem de
+    ter módulos na base, e com um par só uma base nova obrigava a frota
+    inteira a trocar de kernel junto. Par nomeado ausente nunca cai no padrão
+    (`BUILD unknown`): o padrão regravaria o pendrive com um kernel sem módulos
+    naquela base, e a sala subiria sem som, vídeo e wifi, calada. O nome vira
+    caminho numa rota que só pede a chave de boot, por isso a regex
+    (`usb.NOME_BUILD_RE`). Há teste (`tests/test_kernel_por_modelo.py`).
 
 20. **A produção não recebe edição manual.** Conserto se faz aqui, entra no
     repositório, e chega lá por `git pull` + o que o deploy manda instalar. Foi
@@ -190,6 +213,43 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
     diferença, e o próximo reinstall apagaria a correção em silêncio. Por isso
     tudo que a produção precisa é ARQUIVO versionado (`deploy/`, `systemd/`) e
     não instrução em comentário. O procedimento está em `docs/operations.md`.
+
+21. **O instalador apaga discos, e por isso só com prova e com o YES de quem
+    está na frente.**
+    `client/stuff/27-install.sh` (`nb3install=disco|lado`, posto pelo menu do
+    pendrive de instalação, `nb3-genusb --installer`) é da mesma classe do
+    `25-usbupdate.sh`. As regras:
+    - sem a flag, não faz nada (há teste que roda o `nb_install` sem ela);
+    - nunca escolhe disco removível, USB, nem aquele de onde o boot veio. No
+      rig de VM o pendrive é um disco IDE comum, então o disco do boot sai
+      pelo NOME (`NB_CFG_DEV` ou o UUID de `nb3cfg=`), e initrd que não diz
+      de onde veio não instala;
+    - empate entre discos não se decide sozinho: a tela CHOOSE lista os
+      discos e quem está na frente digita o nome (a mesma leitura com prazo),
+      e o YES ainda vem na tela do disco escolhido;
+    - a imagem é baixada para a RAM e conferida pelo md5 ANTES de tocar no
+      disco;
+    - duas confirmações: a escolha no menu e o YES digitado na tela que
+      mostra o disco e o que vai ser feito. A pergunta vem ANTES do download
+      (o técnico responde e segue para a próxima máquina) e é a segunda
+      exceção da invariante 5: uma leitura só (`nb_inst_le`), com prazo. NO,
+      fim da entrada e prazo cancelam sem tocar em nada, e o que estava no
+      buffer do console antes da tela é descartado;
+    - `mke2fs` sempre com `-F` e a entrada vazia, porque diante de um NTFS
+      velho ele pergunta;
+    - o disco gravado ganha assinatura de MBR e número de série de FAT novos
+      (nas duas cópias do setor de boot), ou a entrada do firmware e o
+      `nb3cfg=` podem apontar para o pendrive;
+    - ao lado de outro sistema nada dele muda: o menu chama o carregador da
+      entrada do firmware dele (`bootmgfw.efi`, `shimx64.efi`, `grubx64.efi`),
+      e a desinstalação só leva a entrada com o rótulo exato `Maratona Linux`.
+      No disco inteiro saem também as entradas que apontavam para partições
+      do disco apagado, reconhecidas pelo GUID (ou pela assinatura do MBR)
+      lido ANTES de apagar;
+    - o GRUB gravado nunca é atualizado (a autoatualização só troca kernel e
+      initrd): a imagem da sede carrega `layout` no estado
+      (`usb.GRUB_LAYOUT`), e a rota `/boot/v3/<sede>/install` regera as de
+      desenho anterior. Há teste (`tests/test_install.py`).
 
 ## Nomenclatura
 
@@ -221,7 +281,7 @@ O nome antigo era *template*/*image*; a migração está em
 | `nb3a_` | administração | hash em `data/keys/admin.json` |
 | cookie `nb3_session` | console no navegador | `data/sessions.json` (0600, 30 dias) |
 | `NB3-…` | sub-admin (o próprio convite) | claro em `data/invites.json` |
-| `nb3s_` | serviços externos (MOJ), com escopos | hash em `data/keys/services.json` |
+| `nb3s_` | serviços externos (MOJ, telão), com escopos; da administração ou de um sub-admin (só as imagens dele) | hash em `data/keys/services.json` |
 | `nb3i_` | dono da imagem (configureitor, hotconfig) | `data/site-images/<id>/token` |
 | `nb3m_` | máquina (telemetria, fila de comandos) | `data/site-images/<id>/machine.key` |
 | `nb3b_` | pendrive (endpoints de boot) | `data/site-images/<id>/boot.key` |
@@ -235,7 +295,7 @@ o primeiro. Rota nova de console usa `require_console` + as funções de
 ```bash
 tools/nb3-init                     # instalação nova: emite e IMPRIME a chave
 tools/nb3-dev                      # servidor em 127.0.0.1:8890
-.venv/bin/python -m pytest -q      # 1264 testes, ~3 min
+.venv/bin/python -m pytest -q      # 1428 testes, ~4 min
 tools/nb3-seed-testdata            # dados de teste (não é instalação)
 tools/nb3-layer-worker --check     # confere as ferramentas rootless
 ```
@@ -442,6 +502,21 @@ O ambiente de teste tem um nginx externo que faz proxy de
 - `admin.json` e `services.json` só se escrevem por `services/keys.py` (lock,
   data, quem criou). Nome de chave de serviço repetido é 409: sobrescrever
   trocava a credencial do MOJ calado. Trocar é `rotate`.
+- **Chave de serviço não baixa nada do pendrive** (`routers/usb.py`,
+  `_quem_baixa`), com escopo nenhum. O `conf` e as imagens da sala levam a
+  chave de boot, que abre o `stuff` (com a chave de máquina) e o `clionkey`. A
+  chave do link do telão (`labs:read`) viaja na URL e baixava o `conf` de toda
+  imagem do glob. Rota nova que entrega segredo de imagem por `?tk=` confere o
+  `kind` antes do glob, e o SSE pede `machines:read` ou `roster:read`.
+- **Chave de serviço de sub-admin: o glob vale dentro das imagens do dono,
+  conferido A CADA requisição** (`auth.servico_alcanca`, um lugar só, usado por
+  `Principal.can_see_image`, `auth.exigir_imagem_do_servico` e o `covers` da
+  lista). Conferir o glob na criação não segura a imagem que outra pessoa cria
+  depois com um nome que casa. A chave guarda `owner` (o código do convite: só
+  sai como `owner_ref`/rótulo), ganha o sufixo `@<owner_ref>` no nome e vale
+  enquanto o console do dono vale. A conferência do dono no `identify` não
+  passa por `identify_subadmin`: o `owners.ensure` dele grava em disco, e o MOJ
+  sonda o tempo todo.
 - Os mapas em memória do processo (`keyusage`, `presence`, `ratelimit`) valem
   entre testes: `conftest.data_root` zera os dois primeiros; teste que mexe em
   limite de taxa chama `ratelimit.reset()`.
@@ -525,6 +600,12 @@ O ambiente de teste tem um nginx externo que faz proxy de
   assíncrono, `release()` no `finally`, e o que a tela imprime vai para o
   journal (`logger -t nb3-lock`). Teste com gjs de verdade em
   `tests/test_lock_screen.py`.
+
+## Pull requests
+
+Todo PR segue `docs/pull-requests.md`: levantamento, revisão adversária,
+decisão do mantenedor PR a PR, execução num worktree e publicação só com o OK
+dele. Mesclar não é deployar.
 
 ## Estilo
 

@@ -108,6 +108,20 @@ def test_sse_delivers_events_live(live):
     assert "machine.first_seen" in recebidos
 
 
+@pytest.mark.parametrize("escopo", ["machines:read", "roster:read"])
+def test_sse_abre_para_chave_de_servico_com_escopo_de_leitura(live, escopo):
+    """A outra metade de `test_sse_recusa_chave_de_servico_sem_escopo_de_leitura`
+    (`test_roster_sse.py`): com um destes escopos o fluxo abre."""
+    chave = auth.new_key("nb3s")
+    arq = live["data"] / "keys" / "services.json"
+    atuais = fsdb.read_json(arq, {}) or {}
+    atuais[f"leitor-{escopo.split(':')[0]}"] = {"sha256": auth.key_hash(chave), "scopes": [escopo], "images": []}
+    fsdb.write_json(arq, atuais, mode=0o600)
+    with httpx.stream("GET", f"{live['base']}/api/v1/site-images/testes3/events?tk={chave}", timeout=15) as stream:
+        assert stream.status_code == 200
+        assert next(stream.iter_lines()) == "retry: 3000"
+
+
 def test_lock_latency_over_http(live):
     """Fim a fim, por HTTP real: o agente pendurado no long-poll recebe o
     bloqueio em poucos segundos (o nb2 passava de 30 s)."""

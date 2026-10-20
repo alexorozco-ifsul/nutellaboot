@@ -110,8 +110,7 @@ async def get_logo(image: str, org_id: str, request: Request, tk: str = Query(""
     if p.kind == "service":
         if "roster:read" not in p.scopes:
             raise erro(403, "insufficient_scope", "escopo insuficiente")
-        if not p.can_see_image(image):
-            raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
+        auth.exigir_imagem_do_servico(p, image)
     elif not p.can_see_image(image):
         raise erro(404, "image_not_found", "imagem não existe")
     resposta = logo_response(image, org_id)

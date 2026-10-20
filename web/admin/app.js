@@ -45,6 +45,7 @@ function atualizarTopo() {
     parte(t("nav_models"), u.models, q.models),
     parte(t("nav_images"), u.site_images, q.site_images),
     parte(t("quota_builds"), u.builds, q.builds),
+    parte(t("svckey_quota"), u.service_keys, q.service_keys),
   ].join("  ·  ");
   cota.classList.remove("hidden");
 }

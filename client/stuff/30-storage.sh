@@ -1,7 +1,13 @@
 # shellcheck shell=sh
 # Descoberta de disco local e checagens de pré-montagem.
 
-NB_MIN_FREE_KB=${NB_MIN_FREE_KB:-14971520} # ~14,3 GB
+# 30 GB livres: o que o boot grava no disco. A home persistente (ligada por
+# padrão no GRUB e no iPXE) tem 20 GB, o swap 2 GB, e a base e as outras
+# camadas em cache passam de 6 GB. Com o mínimo antigo, de 15 GB, a máquina
+# passava na checagem, não cabia a home e seguia SEM home persistente, com só
+# um aviso: os arquivos do competidor sumiam no reinício. Partição já usada
+# antes não é medida de novo (o espaço dela já está tomado pelo próprio boot).
+NB_MIN_FREE_KB=${NB_MIN_FREE_KB:-31457280} # 30 GB
 
 # Procura uma partição ext3/ext4/ntfs gravável com espaço suficiente.
 # Resultado em $possibledisks (ext4 na frente; partição já usada vence tudo).
@@ -181,6 +187,36 @@ checkminram() {
 runpremountconfigs() {
     if [ "$factoryreset" = y ]; then
         nutella_findblock
+        # Instalado no disco (27-install.sh) não há pendrive para tirar: ao
+        # lado de outro sistema a remoção desfaz a entrada do firmware e a pasta
+        # da ESP, e no disco inteiro a partição de boot fica (o disco é do
+        # Maratona Linux) e o sistema desce de novo.
+        case "$(nb_boot_origem)" in
+            lado)
+                nb_inst_desinstala
+                nb_fatal_screen "REMOVED" \
+                    "!NutellaBoot has been removed from this computer." \
+                    "" \
+                    "The downloaded system, the persistent home, the swap file" \
+                    "and the boot entry were all deleted. Your other systems and" \
+                    "files were not touched: the next boot starts the system" \
+                    "that was the default before." \
+                    "" \
+                    "!What to do:" \
+                    "  -> nothing; to install it again, use the installer USB drive"
+                ;;
+            disco)
+                nb_fatal_screen "REMOVED" \
+                    "!The downloaded system was removed from this disk." \
+                    "" \
+                    "The system, the persistent home and the swap file were" \
+                    "deleted. The boot partition stays (the disk belongs to" \
+                    "Maratona Linux), so the next start downloads it all again." \
+                    "" \
+                    "!What to do:" \
+                    "  -> nothing: let it restart and download the system again"
+                ;;
+        esac
         nb_fatal_screen "REMOVED" \
             "!NutellaBoot has been removed from this machine." \
             "" \

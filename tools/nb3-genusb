@@ -30,6 +30,7 @@ KERNEL="$REPO/client/build/vmlinuz"
 INITRD="$REPO/client/build/initrd.img"
 SIZE_MB=400
 BIOS=1
+INSTALLER=0
 
 usage() {
     cat << EOF
@@ -48,6 +49,10 @@ Uso: nb3-genusb [opções]
       --initrd ARQUIVO     initrd.img (padrão: client/build/initrd.img)
       --size MB            tamanho da imagem (padrão: 400)
       --no-bios            só EFI (dispensa o grub-mkimage i386-pc)
+      --installer          pendrive de instalação: o menu ganha "instalar no
+                           disco inteiro" e "instalar ao lado do Windows ou
+                           Linux"
+                           (o padrão continua sendo o boot normal)
       --publish            envia a imagem pronta para o servidor de arquivos
 EOF
     exit "${1:-0}"
@@ -68,6 +73,7 @@ while [ $# -gt 0 ]; do
         --initrd) INITRD=$2; shift 2 ;;
         --size) SIZE_MB=$2; shift 2 ;;
         --no-bios) BIOS=0; shift ;;
+        --installer) INSTALLER=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         -h | --help) usage 0 ;;
         *) echo "opção desconhecida: $1" >&2; usage 1 ;;
@@ -220,36 +226,90 @@ if [ -n "\$IMAGEROOT" ]; then
 	fi
 fi
 
+# A partição de onde este menu foi lido vai para o sistema (\`nb3cfg=\`). Com
+# o pendrive espetado numa máquina já instalada no disco existem duas NB3CFG:
+# o initrd lê o conf, e a autoatualização regrava o par, nesta.
+set nb3uuid=""
+probe --set=nb3uuid --fs-uuid "\$root"
+
 menuentry "Maratona Linux\$nb3_sede" {
-	linux /vmlinuz $CMDLINE_BASE persistenthome=y
+	linux /vmlinuz $CMDLINE_BASE persistenthome=y nb3cfg=\$nb3uuid
 	initrd /initrd.img
 }
 menuentry "Maratona Linux\$nb3_sede — limpar a home (clean home)" {
-	linux /vmlinuz $CMDLINE_BASE persistenthome=y cleanhome=y
+	linux /vmlinuz $CMDLINE_BASE persistenthome=y cleanhome=y nb3cfg=\$nb3uuid
 	initrd /initrd.img
 }
 menuentry "Maratona Linux\$nb3_sede — modo live (sem home persistente)" {
-	linux /vmlinuz $CMDLINE_BASE persistenthome=n
+	linux /vmlinuz $CMDLINE_BASE persistenthome=n nb3cfg=\$nb3uuid
 	initrd /initrd.img
 }
+EOF
+
+# O pendrive de instalação é o da sede com duas entradas a mais, e NENHUMA é o
+# padrão: o técnico escolhe no menu, e o instalador ainda mostra o disco e o
+# que vai ser feito e só segue com o YES digitado. Um pendrive errado não apaga
+# nada sozinho. Ao lado de outro sistema só existe no UEFI: no BIOS seria
+# reescrever o MBR dele.
+if [ "$INSTALLER" = 1 ]; then
+    cat >> "$WORK/grub.cfg" << EOF
+menuentry "INSTALAR no disco inteiro — APAGA O DISCO (install on the whole disk, ERASES IT)" {
+	linux /vmlinuz $CMDLINE_BASE nb3install=disco nb3cfg=\$nb3uuid
+	initrd /initrd.img
+}
+if [ "\$grub_platform" = "efi" ]; then
+	menuentry "INSTALAR ao lado do Windows ou Linux (install next to Windows or Linux, UEFI)" {
+		linux /vmlinuz $CMDLINE_BASE nb3install=lado nb3cfg=\$nb3uuid
+		initrd /initrd.img
+	}
+fi
+EOF
+fi
+
+cat >> "$WORK/grub.cfg" << EOF
 menuentry "Remover o NutellaBoot deste computador (factory reset)" {
-	linux /vmlinuz $CMDLINE_BASE factoryreset=y
+	linux /vmlinuz $CMDLINE_BASE factoryreset=y nb3cfg=\$nb3uuid
 	initrd /initrd.img
 }
 EOF
 
 # grub embutido: só encontra a partição e carrega o grub.cfg de verdade,
-# que fica editável na FAT. Busca pelo arquivo (mais confiável que por label,
-# que depende de como o volume foi rotulado) e cai no label como reserva.
+# que fica editável na FAT. O MESMO binário serve aos três lugares onde ele
+# mora (o pendrive, o disco instalado inteiro e a ESP de quem instalou ao lado
+# do Windows), porque o instalador copia este arquivo da imagem da sede.
 cat > "$WORK/grub-embed.cfg" << 'EOF'
 insmod part_msdos
+insmod part_gpt
 insmod fat
 insmod search_fs_file
 insmod search_label
-search --no-floppy --file --set=root /nutellaboot.conf
-if [ -z "$root" ]; then
-	search --no-floppy --label --set=root NB3CFG
+insmod test
+# 1. A partição com o nutellaboot.conf na raiz: o pendrive, ou o disco
+#    instalado inteiro (a p1 dele é a imagem do pendrive). Com os dois
+#    espetados fica a que o `search` achar primeiro, e o grub.cfg passa ao
+#    initrd o UUID DESTA partição (`nb3cfg=`): kernel, initrd, conf e a
+#    autoatualização ficam todos na mesma.
+# 2. O rótulo, como reserva.
+# 3. Ao lado do Windows o menu mora na pasta EFI/nutellaboot da ESP
+#    (client/stuff/27-install.sh). Fica por último para um pendrive espetado
+#    numa máquina instalada continuar bootando o pendrive, que é o que o
+#    técnico escolheu no firmware.
+# Nada aqui usa o `$cmdpath`: numa imagem standalone ele chega vazio (visto em
+# VM, 2026-10-14), e o menu da ESP não abria. O resultado vai numa variável
+# própria: numa imagem standalone o `root` começa em `memdisk`, e o
+# `[ -z "$root" ]` de antes nunca disparava.
+set nb3root=""
+search --no-floppy --file --set=nb3root /nutellaboot.conf
+if [ -z "$nb3root" ]; then
+	search --no-floppy --label --set=nb3root NB3CFG
 fi
+if [ -z "$nb3root" ]; then
+	search --no-floppy --file --set=nb3esp /EFI/nutellaboot/grub.cfg
+	if [ -n "$nb3esp" ]; then
+		configfile "($nb3esp)/EFI/nutellaboot/grub.cfg"
+	fi
+fi
+set root="$nb3root"
 # NÃO redefina prefix aqui: numa imagem standalone os módulos vivem no
 # memdisk, e apontar o prefix para a partição faz o GRUB perder o acesso a
 # eles (o menu carrega vazio, sem erro visível).
@@ -285,8 +345,11 @@ if [ "$BIOS" = 1 ]; then
     if [ -n "$BOOTIMG" ]; then
         # A mesma config embutida do EFI: acha a partição pelo label e carrega
         # o grub.cfg editável de lá — nada depende de número de disco.
+        # No BIOS não há módulo nenhum fora do core.img: tudo que a config
+        # embutida e o grub.cfg usam tem de estar nesta lista (o probe é do
+        # UUID da partição de onde bootou).
         "$MKIMAGE" -O i386-pc -p "()/" -c "$WORK/grub-embed.cfg" -o "$WORK/core.img" \
-            biosdisk part_msdos fat search search_label configfile normal linux echo test sleep
+            biosdisk part_msdos part_gpt fat search search_fs_file search_label configfile normal linux echo test sleep probe
         # boot.img no setor 0 (preservando a tabela de partição) e core.img no
         # espaço livre entre a MBR e o início da partição (1 MiB).
         dd if="$BOOTIMG" of="$OUT" bs=446 count=1 conv=notrunc status=none
@@ -325,6 +388,9 @@ fi
 echo
 echo "pronto: $OUT"
 echo "  modo:      ${IMAGEROOT:-genérico (defina IMAGEROOT em nutellaboot.conf)}"
+if [ "$INSTALLER" = 1 ]; then
+    echo "  instalador: o menu tem 'INSTALAR no disco inteiro' e 'ao lado do Windows ou Linux'"
+fi
 if [ -n "$FULLNAME" ]; then
     echo "  sede:      $FULLNAME"
 elif [ -n "$IMAGEROOT" ]; then

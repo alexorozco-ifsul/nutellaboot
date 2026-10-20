@@ -57,16 +57,23 @@ sistema base sobrescrever tudo, em silêncio.
 Transforma a imagem-mestre num `.squash`:
 
 ```bash
-sudo -E NB3_ADMIN_KEY=nb3a_... NB3_BASE_URL=https://nutellaboot.mdp.naquadah.com.br \
+NB3_ADMIN_KEY=nb3a_... NB3_BASE_URL=https://nutellaboot.mdp.naquadah.com.br \
     tools/nb3-gerar-squash \
         --raw /caminho/ubuntu-24.04-initial.raw \
         --name maratonalinux2026 \
         --publish
 ```
 
-**Por que sudo:** o comando precisa de `losetup` e `mount` para abrir a
-partição raiz de dentro do `.raw`. É o único motivo — todo o resto do fluxo
-roda como usuário comum.
+**Não precisa de root.** Como usuário comum, a partição raiz do `.raw` abre
+pelo `fuse2fs` (pacote `e2fsprogs`, ou `fuse2fs` no Ubuntu), com `fakeroot`
+para ler o que é só do root, e numa cópia reflink da imagem, apagada no fim:
+o `fuse2fs` grava o superbloco (hora e contador de montagem) mesmo com
+`-o ro`, e a imagem-mestre não pode ser tocada. A cópia é instantânea e não
+gasta espaço, mas exige btrfs ou xfs no diretório da imagem; fora disso, rode
+com `sudo`, que abre por `losetup` e `mount`. As duas dão a mesma camada: em 2026-10-08 a
+listagem inteira da base publicada (282508 entradas, com dono, modo, tamanho e
+alvo de link), as capabilities e os xattrs bateram com os da imagem-mestre
+aberta pelo `fuse2fs`.
 
 Demora bastante (dezenas de GB). No fim ele imprime o caminho, o md5 e o
 tamanho, e diz qual é o comando seguinte.
@@ -113,6 +120,27 @@ Casos que ele trata:
   registro que falhou): as camadas e os cadeados do `--de` são copiados, e só
   então a base é trocada.
 - **regerar a base e registrar de novo**: continua com uma base só.
+
+**Base com kernel novo.** O kernel do pendrive tem de ter módulos dentro da
+base (`usr/lib/modules/<versão>`). Uma atualização do Ubuntu que troca o
+kernel (24.04.4 → 24.04.5) pede um par kernel+initrd próprio para o modelo
+novo, e as sedes dos modelos antigos não mudam:
+
+```bash
+# o par novo, com nome, em client/builds/24.04.5 (o padrão continua intacto)
+sudo tools/nb3-build-initrd --raw ubuntu-24.04.5-initial.raw --name 24.04.5
+
+tools/nb3-nova-temporada --de maratona2026 --para maratona2026-24045 \
+    --base data/blobs/maratonalinux2026-24.04.5.squash-... \
+    --boot-build 24.04.5 --publish
+```
+
+O `nb3-nova-temporada` lista os módulos dentro do `.squash` e **recusa**,
+antes de enviar qualquer coisa, a base que não tem o kernel do par do modelo
+(sem `--boot-build`, o par que o modelo já usa ou herda). Pelo console, o par
+se escolhe na página do modelo, seção **Geral**, campo *Kernel do boot* (só a
+administração), e a seção **Camadas** diz em vermelho quando a base não casa
+com o kernel. Mais em [1.4](#14-gerar-o-kernel-e-o-initrd).
 
 Também dá para fazer pela tela: em `/admin/`, aba **Modelos**, **Novo modelo**
 com *Partir de* o modelo do ano anterior. Mas aí a base nova entra à mão, na
@@ -214,6 +242,35 @@ Se preferir não dar root no servidor, dá para fazer o mesmo dentro de uma
 máquina virtual: suba a imagem-mestre, copie `client/initramfs-tools/` para
 `/etc/initramfs-tools/`, rode `update-initramfs -c -k <versão>` e traga
 `vmlinuz` e `initrd.img` de volta para `client/build/`. O resultado é idêntico.
+
+#### Um par por modelo
+
+O kernel tem de casar com os módulos da base: kernel sem módulos na base sobe
+o sistema sem som, vídeo e wifi, e nada reclama. Por isso cada modelo escolhe
+o seu par:
+
+- **o padrão**, `client/build/`, é o de todo modelo sem `boot_build`. Gerar de
+  novo sem `--name` regrava o pendrive de todas essas sedes no boot seguinte;
+- **um par com nome**, `client/builds/<nome>/`, sai de
+  `nb3-build-initrd --name <nome>` e vale só para os modelos com
+  `boot_build=<nome>` (o `--boot-build` do `nb3-nova-temporada`, ou o campo
+  *Kernel do boot* na página do modelo). A cópia de um modelo leva o par.
+
+O servidor recusa o par que não existe e o par cujo kernel não está na base do
+modelo (quando o blob da base está em `data/blobs/`). Um par que some depois
+(diretório apagado) não cai no padrão: as sedes daquele modelo param de
+atualizar o pendrive, e a aba **Sistema** mostra o par em vermelho com o
+comando para gerá-lo. A mesma aba lista todos os pares, a versão do kernel de
+cada um e os modelos que o usam.
+
+O pendrive genérico sai sempre com o padrão. Numa sede de um modelo com outro
+par ele se regrava sozinho no primeiro boot (um reinício a mais) e continua
+servindo para qualquer sede. A imagem de pendrive da sede sai com o par do
+modelo dela, e trocar a sede de modelo a marca como desatualizada.
+
+E se mesmo assim o kernel e a base não casarem (um boot pela rede com o kernel
+antigo, por exemplo), o boot avisa na tela: `kernel <versão> has no modules in
+this system image`.
 
 ### 1.5 Gravar o pendrive
 
@@ -330,6 +387,90 @@ e avisam no console (`the network boot files are out of date`). Avise as sedes
 de netboot para baixarem os dois arquivos de novo — e, se o **kernel** da camada
 base mudou, antes da prova: com o `vmlinuz` velho o sistema montado fica sem os
 módulos do kernel.
+
+#### Instalar no disco: a máquina boota sem pendrive
+
+O **pendrive de instalação** é o da sala com duas entradas a mais no menu do
+GRUB. O padrão do menu continua sendo o boot normal, e a instalação só começa
+se alguém escolher uma das duas:
+
+| Entrada | O que faz |
+|---|---|
+| **INSTALAR no disco inteiro** | APAGA o disco. A imagem do pendrive vai para o começo dele, e o resto vira a partição do sistema e o swap. BIOS e UEFI |
+| **INSTALAR ao lado do Windows ou Linux** | Só UEFI, e nenhuma partição muda. O GRUB vai para a partição EFI; o kernel e o initrd ficam junto do sistema baixado. O Maratona Linux vira o padrão, e o Windows e os outros Linux ficam no menu dele por 10 s |
+
+**Para gerar a imagem:**
+- **no console:** na página da imagem, seção **Pendrive de boot**, item
+  **pendrive de instalação**, botões **Gerar** e depois **Baixar**. Ela sai só
+  sob demanda e não vai para o servidor de arquivos;
+- **na linha de comando:** o mesmo gerador, com `--installer`:
+
+```bash
+NB3_ADMIN_KEY=nb3a_... tools/nb3-genusb --installer \
+    --output 26brbr-instalador.img --imageroot 26brbr --fetch-key \
+    --server https://nutellaboot.mdp.naquadah.com.br
+```
+
+**Na máquina:**
+
+1. Ligue com o pendrive e escolha a entrada no menu.
+2. A máquina sobe a rede e pede ao servidor a imagem do pendrive da sede, a
+   mesma do console. Se ela ainda não existe ou está velha, o servidor a gera
+   na hora, e a tela espera.
+3. **Disco inteiro:**
+   - a tela mostra o disco escolhido (modelo, tamanho, o que há nele) e o que
+     fica no lugar. **Digite `YES` e Enter para instalar.** `NO` cancela, e a
+     tela seguinte lista os discos. Sem resposta em 10 min, nada muda e a
+     máquina reinicia. O download vem depois do `YES`: responda e siga para a
+     próxima máquina;
+   - o disco escolhido é interno: SSD/NVMe antes de HD. Nunca é USB,
+     removível, nem o pendrive de onde a máquina bootou;
+   - com dois discos do mesmo tipo, a tela `CHOOSE` lista os dois, com o que
+     há em cada um. **Digite o nome do disco** (como `sda`), e a tela seguinte
+     pede o `YES` para ele. Para escolher direto, aperte `e` no menu e
+     acrescente `nb3disk=sda` ao fim da linha `linux`. `nb3swap=8` muda o swap
+     de 4 para 8 GB, e `nb3swap=0` tira o swap;
+   - as entradas do firmware dos sistemas que estavam no disco (Windows Boot
+     Manager, ubuntu) saem junto com ele; as de outros discos ficam.
+4. **Ao lado do Windows ou Linux:** a tela mostra a partição EFI e a partição
+   do sistema, e pede o mesmo `YES`. O sistema vai para o espaço livre que o
+   boot de sempre usaria (30 GB numa NTFS ou ext4, e a ext4 vem antes: numa
+   máquina com Windows e Linux, os 30 GB ficam no Linux). O menu do Maratona
+   ganha um item para o Windows e um para cada Linux da partição EFI. As
+   restrições de sempre valem: sem Fast Startup, sem BitLocker nessa
+   partição. Linux só em btrfs (Fedora), LUKS ou XFS não guarda o sistema:
+   ali, só o disco inteiro.
+5. A máquina mostra `DONE` e reinicia. **Tire o pendrive.** O primeiro boot
+   pelo disco baixa o sistema, como o primeiro boot de um pendrive.
+
+**Depois de instalado:**
+- **Atualização:** o disco se atualiza como o pendrive. O kernel e o initrd do
+  modelo são regravados no disco quando o servidor muda de par.
+- **"Remover o NutellaBoot deste computador" (factory reset):**
+  - ao lado de outro sistema, desfaz tudo (entrada do firmware,
+    `\EFI\nutellaboot\`, `nutellaboot/`), e o sistema de antes volta a ser
+    o padrão;
+  - no disco inteiro, apaga o sistema baixado e mantém a partição de boot: o
+    próximo boot baixa tudo de novo.
+
+**O que pode atrapalhar:**
+- **Secure Boot ligado:** o GRUB do pendrive não é assinado, então nem o
+  pendrive de instalação boota. Desligue no firmware, como para o pendrive de
+  sempre. Se alguém o religar depois, o firmware pula o Maratona e sobe o
+  Windows sem avisar.
+- **BitLocker:** mudar a cadeia de boot faz o Windows pedir a chave de
+  recuperação no próximo boot dele. Tenha a chave em mãos.
+- **Atualização do Windows, ou do GRUB do Ubuntu/Debian:** pode pôr o outro
+  sistema em primeiro na ordem do firmware (a do Fedora não faz isso). Rodar o
+  instalador de novo (ao lado) corrige, sem apagar nada.
+- **Pendrive gerado antes do instalador:** para numa tela `TOO OLD`, sem tocar
+  em nada. Reconstrua o initrd (abaixo) e gere a imagem de novo.
+
+> **O instalador precisa do initrd novo.** O `sfdisk` e o `efibootmgr` vão
+> dentro do initrd a partir desta versão, e o bootstrap passou a ler o conf e o
+> wifi entregues pelo GRUB da partição EFI. Reconstruir o par
+> (`nb3-build-initrd`, os dois: o padrão e os nomeados) regrava, uma vez, o
+> pendrive de toda sede, e as sedes de netboot precisam dos arquivos novos.
 
 ### 1.6 Publicação de arquivos (files.mdp)
 
@@ -615,7 +756,9 @@ curl -X POST "$SERVER/api/v1/invites" \
 Cada código sai no formato `NB3-XXXX-XXXX-XXXX`. Os campos: `count` (quantos
 códigos gerar), `max_images` (quantas site-images o código cria, padrão 1),
 `max_models` (quantos modelos próprios, padrão 2), `build_quota` (quantas
-camadas de pacotes, padrão 5), `label` (nome amigável que aparece no console
+camadas de pacotes, padrão 5), `max_service_keys` (quantas chaves de serviço,
+para o MOJ e o telão do laboratório, padrão 5), `label` (nome amigável que
+aparece no console
 de quem recebe), `model` (opcional — fixa o modelo, senão a pessoa escolhe
 entre os públicos) e `expires_at` (opcional, epoch). Entregue o código por um
 canal privado.
@@ -976,8 +1119,9 @@ O seletor de período ("30 min · 2 h · 5 h · 24 h · desde…") fica na URL:
 para o início da prova.
 
 Ao compartilhar, escolha o que o link mostra: **o link segue a minha seleção**
-(o padrão: ele mostra a visão da frota da administração, e muda na hora em que
-você a muda) ou **o link mostra só as imagens informadas abaixo** (um recorte
+(o padrão: ele mostra a visão da frota de quem criou o link, e muda na hora em
+que essa pessoa a muda; o sub-admin compartilha o telão do laboratório dele do
+mesmo jeito) ou **o link mostra só as imagens informadas abaixo** (um recorte
 fixo por globs, como `26br*`). O link que segue a seleção nunca se alarga
 sozinho, e os globs continuam sendo o teto.
 
@@ -1013,7 +1157,7 @@ da página: ele é a credencial de console daquela pessoa.
 
 A aba **Pessoas** do `/admin/` (só da administração) tem uma linha por convite,
 com o rótulo, a situação (não usado, em uso, suspenso, revogado, vencido), o uso
-das cotas (modelos, imagens, construções) e o último acesso. Quem entrou por
+das cotas (modelos, imagens, construções, chaves de serviço) e o último acesso. Quem entrou por
 convite é a mesma linha: o convite é a credencial do console da pessoa, e as
 cotas moram nele. Os pedidos pendentes aparecem no topo da aba.
 
@@ -1022,7 +1166,7 @@ Clique na linha para abrir a página da pessoa:
 - **Código do convite**: escondido; **Mostrar o código** quando for preciso
   reenviá-lo.
 - **Convite e cotas**: rótulo, validade, perfil das imagens, trava do papel de
-  parede e as três cotas, com um **Salvar** só.
+  parede e as quatro cotas, com um **Salvar** só.
 - **Uso**: o que a pessoa já criou.
 - **Acesso**: **Suspender** (existe depois que a pessoa entrou) fecha o console
   e a criação de imagens pelo `/criar/`. **Revogar** fecha o convite, com o
@@ -1033,8 +1177,9 @@ Clique na linha para abrir a página da pessoa:
 
 ### Chaves: ver, criar, revogar
 
-A aba **Chaves** do `/admin/` (só da administração) reúne o que antes pedia
-`curl` ou acesso ao servidor:
+A aba **Chaves** do `/admin/` reúne o que antes pedia `curl` ou acesso ao
+servidor. O sub-admin também a vê, só com as chaves de serviço dele (veja
+"Chaves de serviço de sub-admin", abaixo):
 
 - **Chaves de administração**: a lista (quem criou, quando, último uso, quantas
   sessões abertas, e qual é a desta sessão), criar e revogar. Criar e revogar
@@ -1047,7 +1192,27 @@ A aba **Chaves** do `/admin/` (só da administração) reúne o que antes pedia
   **Editar** muda escopos e globs; **Trocar** dá uma chave nova com o mesmo
   nome (a antiga morre na hora); **Revogar** apaga. Nome repetido é erro, não
   sobrescrita. O recomendado é uma chave por evento. O link do dashboard
-  compartilhado é uma delas (veja "Compartilhar o dashboard").
+  compartilhado é uma delas (veja "Compartilhar o dashboard"). A coluna
+  **Dono** diz se a chave é da administração ou de qual pessoa, e **Alcança
+  agora** conta as imagens que ela alcança neste momento.
+
+**Chaves de serviço de sub-admin.** Quem entrou por convite cria as chaves do
+próprio laboratório (o MOJ dele, o telão dele) na mesma aba, dentro da cota
+**Chaves de serviço** do convite (padrão 5):
+
+- o glob só alcança as imagens da pessoa, conferido a cada requisição. Uma
+  imagem que outra pessoa (ou a administração) cria depois com um nome que casa
+  fica de fora, e a de outro dono responde como se não existisse;
+- o nome ganha o sufixo `@<referência>` da pessoa, e por isso não colide com o
+  de ninguém;
+- o telão dela segue a visão da frota DELA, nunca a da administração;
+- a chave para junto com o console da pessoa: suspender, revogar ou deixar o
+  convite vencer corta as chaves, e reativar as devolve. Apagar o convite
+  apaga as chaves;
+- a chave nunca pode mais que a pessoa: numa imagem Oficial, os cadeados do
+  modelo valem para ela.
+
+A administração vê as chaves de todos, com o dono, e revoga qualquer uma.
 
 A **Auditoria das credenciais** (o que foi feito com chaves e convites, por quem
 e de onde) fica na aba **Sistema**. Ela não guarda segredo nenhum.
@@ -1260,7 +1425,8 @@ meia hora e o botão volta a funcionar — a passada não continua de onde parou
 ### Chave de serviço para o MOJ
 
 O juiz consome a API com uma chave `nb3s_` de escopos limitados, criada uma
-vez pela administração (`docs/api.md`, seção "Integração com o MOJ"):
+vez pela administração, ou pelo sub-admin para as imagens dele
+(`docs/api.md`, seção "Integração com o MOJ"):
 
 ```bash
 curl -sS -X POST "$SERVER/api/v1/service-keys" -H "Authorization: Bearer $ADMIN_KEY" \
@@ -1467,8 +1633,10 @@ distribuído fisicamente.
 ### A tela vermelha "NO DISK"
 
 A máquina não achou onde guardar o sistema: precisa de uma partição
-ext3/ext4/NTFS gravável com pelo menos 15 GB **livres**, para o cache das
-camadas e a home persistente. Nada é apagado — só espaço livre é usado.
+ext3/ext4/NTFS gravável com pelo menos 30 GB **livres**: a home persistente
+tem 20 GB, o swap 2 GB, e a base e as outras camadas em cache passam de 6 GB.
+Nada é apagado — só espaço livre é usado. Uma partição que já foi usada antes
+não é medida de novo.
 
 **A própria tela diz a causa provável e o que fazer.** Ela lista cada partição
 encontrada e por que foi recusada, e escolhe entre quatro diagnósticos:
@@ -1476,7 +1644,7 @@ encontrada e por que foi recusada, e escolhe entre quatro diagnósticos:
 | O que a tela diz | O que fazer |
 |---|---|
 | `WINDOWS FAST STARTUP` | o Windows foi hibernado, não desligado, e deixou o disco travado. Iniciar o Windows e rodar `shutdown /s /t 0`, ou desligar o Fast Startup nas Opções de Energia |
-| `NOT ENOUGH FREE SPACE` | há disco, mas nenhum com 15 GB livres |
+| `NOT ENOUGH FREE SPACE` | há disco, mas nenhum com 30 GB livres |
 | `THE DISK WAS NOT DETECTED AT ALL` | controladora em RAID / Intel RST; trocar para AHCI no setup da BIOS |
 | `NO SUPPORTED FILESYSTEM` | só exFAT/FAT32, ou partição com BitLocker (que não pode ser lida) |
 

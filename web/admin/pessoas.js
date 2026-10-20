@@ -46,6 +46,8 @@ const uso = (p, qual) => {
   const q = p.dono ? p.dono.quotas || {} : {};
   if (qual === "models") return `${u.models ?? 0}/${q.models ?? (p.inv ? p.inv.max_models : "∞")}`;
   if (qual === "images") return `${p.dono ? u.site_images ?? 0 : p.inv ? p.inv.used : 0}/${q.site_images ?? (p.inv ? p.inv.max_images : "∞")}`;
+  // convite de antes do campo: o servidor aplica o padrão, 5
+  if (qual === "keys") return `${u.service_keys ?? 0}/${q.service_keys ?? (p.inv ? p.inv.max_service_keys ?? 5 : "∞")}`;
   return `${u.builds ?? 0}/${q.builds ?? (p.inv ? p.inv.build_quota : "∞")}`;
 };
 
@@ -67,6 +69,7 @@ export const dialogoNovoConvite = async ({ modelos = [], pedido = null } = {}) =
     { nome: "max_images", rotulo: t("invite_max_images"), tipo: "number", valor: 1, min: 0 },
     { nome: "max_models", rotulo: t("invite_max_models"), tipo: "number", valor: 2, min: 0 },
     { nome: "build_quota", rotulo: t("quota_builds"), tipo: "number", valor: 5, min: 0 },
+    { nome: "max_service_keys", rotulo: t("svckey_quota"), tipo: "number", valor: 5, min: 0, ajuda: t("svckey_quota_help") },
     {
       nome: "model",
       rotulo: t("invite_model"),
@@ -102,6 +105,7 @@ export const dialogoNovoConvite = async ({ modelos = [], pedido = null } = {}) =
         max_images: v.max_images ?? 1,
         max_models: v.max_models ?? 2,
         build_quota: v.build_quota ?? 5,
+        max_service_keys: v.max_service_keys ?? 5,
         unlocked: v.perfil === "free",
         wallpaper_locked: Boolean(v.wallpaper_locked),
       };
@@ -188,7 +192,7 @@ const vistaLista = async (alvo, ctx) => {
   const pessoas = juntar(convites.invites, donos.owners);
   const lista = secao({ id: "lista", titulo: t("people_list_title") });
   lista.corpo.append(tabela(
-    [t("invite_label"), t("status"), t("nav_models"), t("nav_images"), t("quota_builds"), t("owner_last_seen")],
+    [t("invite_label"), t("status"), t("nav_models"), t("nav_images"), t("quota_builds"), t("svckey_quota"), t("owner_last_seen")],
     pessoas.map((p) => ({
       celulas: [
         el("b", {}, linkPara(rotuloDe(p), "pessoas", p.ref)),
@@ -196,6 +200,7 @@ const vistaLista = async (alvo, ctx) => {
         uso(p, "models"),
         uso(p, "images"),
         uso(p, "builds"),
+        uso(p, "keys"),
         el("span", { class: "muted" }, p.dono && p.dono.last_seen ? quando(p.dono.last_seen) : "—"),
       ],
       aoClicar: () => irPara("pessoas", p.ref),
@@ -215,6 +220,7 @@ const desenharConvite = (corpo, inv, modelos) => {
     max_images: inv.max_images ?? 1,
     max_models: inv.max_models ?? 2,
     build_quota: inv.build_quota ?? 5,
+    max_service_keys: inv.max_service_keys ?? 5,
     model: inv.model || "",
     perfil: inv.unlocked === false ? "official" : "free",
     wallpaper_locked: Boolean(inv.wallpaper_locked),
@@ -268,7 +274,7 @@ const desenharConvite = (corpo, inv, modelos) => {
   salvar.onclick = acao(async () => {
     const mudancas = {};
     for (const k of ["label", "note"]) if (r[k].trim() !== original[k]) mudancas[k] = r[k].trim();
-    for (const k of ["max_images", "max_models", "build_quota"]) {
+    for (const k of ["max_images", "max_models", "build_quota", "max_service_keys"]) {
       if (r[k] !== "" && r[k] !== original[k]) mudancas[k] = r[k];
     }
     if (r.model !== original.model) mudancas.model = r.model || null;
@@ -290,6 +296,7 @@ const desenharConvite = (corpo, inv, modelos) => {
       campo(t("invite_max_images"), numero("max_images")),
       campo(t("invite_max_models"), numero("max_models")),
       campo(t("quota_builds"), numero("build_quota"), t("quota_builds_help")),
+      campo(t("svckey_quota"), numero("max_service_keys"), t("svckey_quota_help")),
       campo(t("invite_model"), modelo, t("invite_model_help")),
       campo(t("profile"), perfil, t("invite_profile_help")),
       caixa(t("invite_wallpaper_locked"), trava),
@@ -339,6 +346,7 @@ const vistaPessoa = async (alvo, ctx) => {
       el("dt", {}, t("nav_images")), el("dd", {}, uso(p, "images"), " ",
         ...minhasImagens.flatMap((m, i) => [i ? ", " : "", linkPara(m.id, "imagens", m.id)])),
       el("dt", {}, t("quota_builds")), el("dd", {}, uso(p, "builds")),
+      el("dt", {}, t("svckey_quota")), el("dd", {}, uso(p, "keys"), " ", linkPara(t("nav_keys"), "chaves")),
       el("dt", {}, t("owner_last_seen")), el("dd", {}, p.dono && p.dono.last_seen ? quando(p.dono.last_seen) : "—"))
   );
   alvo.append(uso_.no);

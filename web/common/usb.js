@@ -193,10 +193,79 @@ export function usbBlock(imageId, token = "", { sinal, semTitulo = false } = {})
       caixa.appendChild(gerar);
     }
 
+    // 4. o pendrive de instalação: o da sala com o menu de instalar no disco,
+    // para a máquina bootar sem pendrive dali em diante. Sob demanda: serve a
+    // quem prepara o laboratório, e escolhido no menu ele apaga o disco.
+    const inst = d.installer;
+    if (inst) {
+      const ouInst = document.createElement("p");
+      ouInst.className = "muted small";
+      ouInst.textContent = `— ${t("usb_installer_or")} —`;
+      caixa.appendChild(ouInst);
+
+      const tabela3 = document.createElement("table");
+      tabela3.appendChild(
+        linha(
+          `${t("usb_installer")} <span class="muted mono">${mb(inst.size)}</span>`,
+          t("usb_installer_help"),
+          inst.status === "done"
+            ? botaoBaixar(api.usbInstallerUrl(imageId, token), t("usb_download"))
+            : estadoSimples(inst)
+        )
+      );
+      caixa.appendChild(tabela3);
+
+      const cuidado = document.createElement("p");
+      cuidado.className = "msg warn";
+      cuidado.textContent = t("usb_installer_warn");
+      caixa.appendChild(cuidado);
+
+      if (inst.status === "done") {
+        const comoInst = document.createElement("p");
+        comoInst.className = "help";
+        comoInst.innerHTML = `<code>${comandoGravar(`${inst.file}.gz`)}</code>`;
+        caixa.appendChild(comoInst);
+      }
+      if (inst.status === "done" && inst.stale) {
+        const velho = document.createElement("p");
+        velho.className = "msg warn";
+        velho.textContent = motivoDesatualizada(inst.stale_reason || []);
+        caixa.appendChild(velho);
+      }
+      if (inst.error) {
+        const erroInst = document.createElement("p");
+        erroInst.className = "muted small";
+        erroInst.textContent = inst.error.slice(0, 200);
+        caixa.appendChild(erroInst);
+      }
+      if (inst.status !== "building") {
+        const gerarInst = document.createElement("button");
+        gerarInst.className = "small";
+        gerarInst.textContent = inst.status === "done" ? t("usb_regenerate") : t("usb_generate");
+        gerarInst.onclick = async () => {
+          gerarInst.disabled = true;
+          try {
+            await api.post(
+              `/api/v1/site-images/${encodeURIComponent(imageId)}/usb/installer`,
+              {},
+              { token }
+            );
+          } finally {
+            carregar();
+          }
+        };
+        caixa.appendChild(gerarInst);
+      }
+    }
+
     // enquanto está gerando, volta a perguntar; parado, não bate no servidor
     clearTimeout(timer);
     if (sinal && sinal.aborted) return;
-    if (i.status === "building" || d.generic.status === "building") {
+    if (
+      i.status === "building" ||
+      d.generic.status === "building" ||
+      (inst && inst.status === "building")
+    ) {
       timer = setTimeout(carregar, RECARGA_MS);
     }
   }

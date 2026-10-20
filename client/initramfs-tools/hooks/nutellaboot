@@ -155,6 +155,15 @@ copy_exec /sbin/mkfs.ext4 /sbin
 copy_exec /sbin/mke2fs /sbin/mke2fs.good
 copy_exec /sbin/blkid /sbin
 
+# --- instalação no disco (client/stuff/27-install.sh) ---
+# O instalador acrescenta as partições de dados e de swap à tabela que veio
+# com a imagem do pendrive, e cria a entrada de boot do UEFI ANTES de
+# reiniciar: o sistema da base, que também tem os dois, só existe depois de
+# as camadas descerem — tarde demais. O destino vai com o caminho completo
+# (ver o stdbuf acima), e o nb3-build-initrd confere que os dois entraram.
+copy_exec /usr/sbin/sfdisk /usr/sbin/sfdisk
+copy_exec /usr/bin/efibootmgr /usr/bin/efibootmgr
+
 # --- seeding ---
 copy_exec /usr/bin/webfsd /usr/bin
 

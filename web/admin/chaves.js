@@ -1,14 +1,16 @@
-// Aba Chaves (só a administração): as chaves de administração, as de serviço
+// Aba Chaves: as chaves de administração (só a administração), as de serviço
 // (o MOJ, o telão) e o link do dashboard, que é uma chave de serviço com
 // labs:read. Eram duas listas das mesmas chaves (a do cartão da frota revogava
-// sem perguntar), e cada chave nova aparecia de um jeito diferente.
+// sem perguntar), e cada chave nova aparecia de um jeito diferente. O
+// sub-admin vê só as chaves de serviço dele (o servidor filtra), que ganham o
+// sufixo @… no nome e só alcançam as imagens dele.
 
 import * as api from "/common/api.js";
 import { t } from "/common/i18n.js";
 import { $, el, quando, toast } from "/common/ui.js";
 import { acao } from "/common/acao.js";
 import { confirmar, formulario, mostrarSegredo } from "/common/dialogo.js";
-import { A, cabecalho, carregarEm, secao, tabela } from "./comum.js";
+import { A, cabecalho, carregarEm, ehAdmin, rotuloDoDono, secao, tabela } from "./comum.js";
 
 // --- reautenticação ---
 //
@@ -136,7 +138,23 @@ const caixasDeEscopo = (marcados) => {
 
 const lista = (texto) => String(texto || "").split(/[\s,]+/).filter(Boolean);
 
+// criar e revogar mexem na cota do sub-admin: a linha do topo se refaz
+const avisarEu = () => document.dispatchEvent(new CustomEvent("nb3:eu-mudou"));
+
 const ehDoDashboard = (k) => (k.scopes || []).length === 1 && k.scopes[0] === "labs:read";
+
+// O glob de uma chave de sub-admin só vale dentro das imagens do dono: os
+// textos dizem isso a quem cria (o sub-admin) e a quem só olha (a
+// administração), e "vazio" deixa de ser "todas as imagens".
+const daPessoa = (k) => k.owner_kind === "subadmin";
+const ajudaDoGlob = (k) => {
+  if (!ehAdmin()) return t("svckey_images_help_sub");
+  return k && daPessoa(k) ? t("svckey_images_help_owned", { owner: rotuloDoDono(k) }) : t("svckey_images_help");
+};
+const semGlob = (k) => {
+  if (!daPessoa(k)) return t("svckey_all_images");
+  return ehAdmin() ? t("svckey_all_owner") : t("svckey_all_mine");
+};
 
 const urlDoDashboard = (chave) => `${location.origin}/dashboard/?tk=${chave}`;
 
@@ -155,9 +173,9 @@ const desenharServico = (corpo, sinal) =>
         acao: t("create"),
         largo: true,
         campos: [
-          { nome: "name", rotulo: t("svckey_name"), obrigatorio: true, placeholder: "moj-2026" },
+          { nome: "name", rotulo: t("svckey_name"), obrigatorio: true, placeholder: "moj-2026", ajuda: ehAdmin() ? "" : t("svckey_name_help_sub") },
           { nome: "scopes", rotulo: t("svckey_scopes"), tipo: "no", no: esc.no, ler: esc.ler },
-          { nome: "images", rotulo: t("svckey_images"), placeholder: "26brbr* 26brsp*", ajuda: t("svckey_images_help") },
+          { nome: "images", rotulo: t("svckey_images"), placeholder: ehAdmin() ? "26brbr* 26brsp*" : "lab*", ajuda: ajudaDoGlob(null) },
         ],
         enviar: (v) => {
           if (!v.scopes.length) throw new Error(t("svckey_need_name_scope"));
@@ -167,6 +185,7 @@ const desenharServico = (corpo, sinal) =>
       if (!r) return false;
       await mostrarSegredo({ titulo: `${t("svckey_created")} ${r.name}`, itens: [{ rotulo: r.name, valor: r.key }], aviso: t("key_shown_once") });
       refazer();
+      avisarEu();
       return true;
     });
 
@@ -187,20 +206,27 @@ const desenharServico = (corpo, sinal) =>
               { valor: "globs", rotulo: t("dash_share_globs") },
             ],
           },
-          { nome: "images", rotulo: t("svckey_images"), placeholder: "26br*", ajuda: t("dash_share_images_help") },
+          {
+            nome: "images",
+            rotulo: t("svckey_images"),
+            placeholder: ehAdmin() ? "26br*" : "lab*",
+            ajuda: ehAdmin() ? t("dash_share_images_help") : t("svckey_images_help_sub"),
+          },
         ],
         enviar: (v) => {
-          // "seguir": o link mostra o que a administração escolheu na visão da
-          // frota, e muda junto com ela. "globs": o recorte fixo de sempre.
+          // "seguir": o link mostra o que quem o criou escolheu na visão da
+          // frota (a administração ou o sub-admin), e muda junto com ela.
+          // "globs": o recorte fixo de sempre.
           const segue = v.modo === "segue";
           const nome = `dashboard-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`;
           return api.post("/api/v1/service-keys",
-            { name: nome, scopes: ["labs:read"], images: segue ? [] : lista(v.images), follow: segue ? "admin" : "" }, A);
+            { name: nome, scopes: ["labs:read"], images: segue ? [] : lista(v.images), follow: segue ? "owner" : "" }, A);
         },
       });
       if (!r) return false;
       await mostrarSegredo({ titulo: t("dash_share_make"), itens: [{ rotulo: t("dash_share_url"), valor: urlDoDashboard(r.key) }], aviso: t("dash_share_once") });
       refazer();
+      avisarEu();
       return true;
     });
 
@@ -213,7 +239,7 @@ const desenharServico = (corpo, sinal) =>
           largo: true,
           campos: [
             { nome: "scopes", rotulo: t("svckey_scopes"), tipo: "no", no: esc.no, ler: esc.ler },
-            { nome: "images", rotulo: t("svckey_images"), valor: (k.images || []).join(" "), ajuda: t("svckey_images_help") },
+            { nome: "images", rotulo: t("svckey_images"), valor: (k.images || []).join(" "), ajuda: ajudaDoGlob(k) },
           ],
           enviar: (v) => {
             if (!v.scopes.length) throw new Error(t("svckey_need_name_scope"));
@@ -241,6 +267,7 @@ const desenharServico = (corpo, sinal) =>
         if (!(await confirmar({ texto: t("svckey_revoke_confirm", { name: k.name }), acao: t("act_revoke"), perigo: true }))) return false;
         await api.del(`/api/v1/service-keys/${encodeURIComponent(k.name)}`, A);
         refazer();
+        avisarEu();
         return true;
       });
       const pills = [];
@@ -248,25 +275,35 @@ const desenharServico = (corpo, sinal) =>
       if (k.follow) pills.push(" ", el("span", { class: "pill", title: t("svckey_follow_help") }, t("svckey_follow")));
       return [
         el("span", { class: "mono" }, k.name, ...pills),
+        // a administração vê de quem é cada chave; o sub-admin só vê as dele
+        ehAdmin() ? el("span", {}, rotuloDoDono(k)) : null,
         el("span", { class: "muted mono" }, (k.scopes || []).join(" ")),
-        el("span", { class: "muted mono" }, (k.images || []).join(" ") || t("svckey_all_images")),
-        el("span", { class: "muted" }, quando(k.created_at), k.created_by ? ` · ${k.created_by}` : ""),
+        el("span", { class: "muted mono" }, (k.images || []).join(" ") || semGlob(k)),
+        String(k.covers ?? ""),
+        // o `created_by` de uma chave de sub-admin é a referência do dono
+        el("span", { class: "muted" }, quando(k.created_at), k.created_by && !daPessoa(k) ? ` · ${k.created_by}` : ""),
         el("span", { class: "muted" }, k.last_used ? quando(k.last_used) : t("keys_never")),
         el("span", { class: "actions" }, editar, trocar, revogar),
-      ];
+      ].filter((c) => c !== null);
     });
+    const colunas = [t("svckey_name"), ehAdmin() ? t("owner_col") : null, t("svckey_scopes"), t("svckey_images"),
+      t("svckey_covers"), t("keys_created_at"), t("keys_last_used"), ""].filter((c) => c !== null);
     corpo.replaceChildren(
       el("div", { class: "actions" }, nova, dashboard),
-      tabela([t("svckey_name"), t("svckey_scopes"), t("svckey_images"), t("keys_created_at"), t("keys_last_used"), ""], linhas,
-        { vazio: t("svckey_none") })
+      tabela(colunas, linhas, { vazio: t("svckey_none") })
     );
   });
 
 export const vista = async (alvo, ctx) => {
-  alvo.append(cabecalho({ titulo: t("nav_keys") }), el("p", { class: "help" }, t("keys_section_help")));
-  const admin = secao({ id: "admin", titulo: t("adminkey_title") });
+  alvo.append(cabecalho({ titulo: t("nav_keys") }),
+    el("p", { class: "help" }, ehAdmin() ? t("keys_section_help") : t("keys_section_help_sub")));
+  // as chaves de administração nem aparecem para o sub-admin (a rota é 401)
+  if (ehAdmin()) {
+    const admin = secao({ id: "admin", titulo: t("adminkey_title") });
+    alvo.append(admin.no);
+    desenharAdmin(admin.corpo, ctx.sinal);
+  }
   const servico = secao({ id: "servico", titulo: t("svckey_title"), ajuda: t("svckey_help") });
-  alvo.append(admin.no, servico.no);
-  desenharAdmin(admin.corpo, ctx.sinal);
+  alvo.append(servico.no);
   desenharServico(servico.corpo, ctx.sinal);
 };

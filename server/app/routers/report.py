@@ -33,13 +33,13 @@ async def relatorio(
     tk: str = Query(""),
 ):
     p = auth.principal_de_link(request, tk, image)
-    if p is not None and p.kind == "service" and not p.can_see_image(image):
-        raise erro(403, "image_out_of_scope", "sem acesso a esta imagem")
-    if p is None or not p.can_see_image(image):
+    if p is not None and p.kind == "service":
+        if "machines:read" not in p.scopes:
+            # o relatório é a telemetria inteira: mesma exigência do GET machines
+            raise erro(403, "insufficient_scope", "escopo insuficiente")
+        auth.exigir_imagem_do_servico(p, image)
+    elif p is None or not p.can_see_image(image):
         raise erro(401, "unauthorized", "credencial ausente ou inválida")
-    if p.kind == "service" and "machines:read" not in p.scopes:
-        # o relatório é a telemetria inteira: mesma exigência do GET machines
-        raise erro(403, "insufficient_scope", "escopo insuficiente")
     if not store.site_image_exists(image):
         raise erro(404, "image_not_found", "imagem não existe")
 

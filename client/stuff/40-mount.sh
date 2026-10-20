@@ -1,7 +1,12 @@
 # shellcheck shell=sh
 # Montagem do root (overlayfs sobre as camadas squashfs), home persistente e swap.
 
-mount_layers() {
+# Os drivers de disco, o udev e a varredura (nutella_findblock), uma vez por
+# boot. Quem precisa do disco antes do mount_layers é o nb_usb_update
+# (25-usbupdate.sh): o marcador de "uma tentativa por versão" e os arquivos
+# novos têm de sobreviver ao reinício.
+nb_find_storage() {
+    [ -n "${nb_storage_scanned:-}" ] && return 0
     for mod in squashfs overlay loop ahci ext4 fuse virtio_blk virtio_net nvme sd_mod; do
         modprobe "$mod" 2>/dev/null
     done
@@ -9,16 +14,29 @@ mount_layers() {
 
     PATH="$PATH:/usr/bin"
     nutella_findblock
+    # varredura vazia não fica guardada: com o pendrive velho ela roda mais
+    # cedo, e um SATA lento que ainda não apareceu ganha a segunda chance no
+    # mount_layers, como tinha antes
+    [ -n "$possibledisks" ] && nb_storage_scanned=1
+    return 0
+}
+
+# Monta $1 em $BLOCKROOT: ext4, senão NTFS (o FSTYPE diz qual).
+nb_mount_storage() {
+    FSTYPE=ext4
+    mount "$1" "$BLOCKROOT" 2> /dev/null && return 0
+    FSTYPE=ntfs
+    mount -t ntfs -o permissions "$1" "$BLOCKROOT" 2> /dev/null
+}
+
+mount_layers() {
+    nb_find_storage
     [ -z "$possibledisks" ] && nb_no_disk_screen
 
     _ok=0
     for disk in $possibledisks; do
         nb_warn "using $disk"
-        FSTYPE=ext4
-        if ! mount "$disk" "$BLOCKROOT" 2>/dev/null; then
-            FSTYPE=ntfs
-            mount -t ntfs -o permissions "$disk" "$BLOCKROOT" 2>/dev/null || continue
-        fi
+        nb_mount_storage "$disk" || continue
         mkdir -p "$STORAGEDIR"
         if nb_retry "${NB_MANIFEST_TRIES:-10}" 10 download_boot_files "$STORAGEDIR"; then
             _ok=1
@@ -63,6 +81,23 @@ mount_layers() {
         -olowerdir="${_schema#:}",upperdir="$_upper",workdir="$_work" "${rootmnt?}" ||
         nb_fatal "could not mount the overlay"
     log_end_msg
+    nb_kernel_modules_check
+}
+
+# O kernel que bootou sem módulos na base: o sistema sobe, mas sem driver de
+# som, vídeo e wifi, e nada mais reclama. É o par kernel+initrd que não casa
+# com a base do modelo (o boot_build errado, ou a base trocada sem trocar o
+# par), ou um servidor de boot pela rede com o kernel antigo. Aviso e não
+# parada: a máquina ainda serve para a prova.
+nb_kernel_modules_check() {
+    _nkm_v=$(cat /proc/sys/kernel/osrelease 2> /dev/null)
+    [ -n "$_nkm_v" ] || return 0
+    [ -d "${rootmnt?}/usr/lib/modules/$_nkm_v" ] && return 0
+    [ -d "${rootmnt?}/lib/modules/$_nkm_v" ] && return 0
+    nb_warn "kernel $_nkm_v has no modules in this system image: no sound, video or wifi drivers - the boot files do not match the base of this model"
+    # a tela seguinte apaga a linha em menos de um segundo; só neste caso
+    sleep "${NB_KERNEL_WARN_WAIT:-5}"
+    return 0
 }
 
 mount_persistenthome() {
@@ -95,6 +130,17 @@ mount_persistenthome() {
 }
 
 createandactivateswap() {
+    # Instalado no disco inteiro (27-install.sh), o swap é a partição com o
+    # NOSSO rótulo. Nunca um swap sem rótulo ou de outro sistema: ele pode
+    # guardar a hibernação daquele sistema, e usá-lo a destruiria.
+    _swap=${NB_SWAP_BYLABEL:-/dev/disk/by-label/NB3SWAP}
+    if [ -e "$_swap" ]; then
+        _swap=$(readlink -f "$_swap")
+        if "${rootmnt?}/sbin/swapon" "$_swap" 2> /dev/null; then
+            nb_log "swap on the NB3SWAP partition ($_swap)"
+            return 0
+        fi
+    fi
     _swap=$STORAGEDIR/swapfile
     log_begin_msg "Preparing swap on disk"
     if [ ! -e "$_swap" ]; then

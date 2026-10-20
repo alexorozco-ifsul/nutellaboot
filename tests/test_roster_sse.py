@@ -151,3 +151,18 @@ def test_lockinfo_has_no_secrets(client, img, hi, hm):
 def test_sse_requires_valid_token(client, img):
     with client.stream("GET", "/api/v1/site-images/testes3/events?tk=errado") as r:
         assert r.status_code == 401
+
+
+@pytest.mark.parametrize("escopos", [["labs:read"], ["commands:write", "webhooks:write"]])
+def test_sse_recusa_chave_de_servico_sem_escopo_de_leitura(client, img, escopos):
+    """O fluxo leva MAC, status e comando de cada máquina. A chave do telão
+    (`labs:read`, só agregados) entrava nele com escopo nenhum. O lado que abre
+    (`machines:read` ou `roster:read`) está em `test_live_server.py`: o
+    TestClient não termina um fluxo que não termina."""
+    from server.app.services import keys
+
+    chave = keys.servico_criar("telao", escopos, [], "admin" if escopos == ["labs:read"] else "")["key"]
+    with client.stream("GET", f"/api/v1/site-images/testes3/events?tk={chave}") as r:
+        assert r.status_code == 403
+        r.read()
+        assert r.json()["code"] == "insufficient_scope"

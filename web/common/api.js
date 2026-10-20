@@ -131,6 +131,12 @@ export function usbImageUrl(image, token) {
   return `/api/v1/site-images/${encodeURIComponent(image)}/usb/image${q}`;
 }
 
+export function usbInstallerUrl(image, token) {
+  const tk = _tk(token);
+  const q = tk ? `?tk=${encodeURIComponent(tk)}` : "";
+  return `/api/v1/site-images/${encodeURIComponent(image)}/usb/installer/image${q}`;
+}
+
 export function usbGenericUrl(image, token) {
   // a genérica não é de imagem nenhuma, mas ainda pede credencial: são 400 MB
   // saindo da máquina que responde à API durante a prova
