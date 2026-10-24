@@ -17,6 +17,7 @@ O que eles protegem, além de "funciona":
     é nosso.
 """
 
+import gzip
 import hashlib
 import os
 import shutil
@@ -96,6 +97,7 @@ while [ $# -gt 0 ]; do
         *) shift ;;
     esac
 done
+echo "aria2c $url" >> "$ACOES"
 nome=${url##*/}
 [ -f "$SERVIDOR/$nome" ] || exit 3
 cp "$SERVIDOR/$nome" "$dir/$base"
@@ -195,13 +197,18 @@ class Maquina:
                 (self.blkid / f"{pnome}.{chave}").write_text(valor + "\n")
         return no
 
-    def servir(self, imagem: Path) -> None:
-        """O servidor tem a imagem e responde IMAGE para o instalador."""
+    def servir(self, imagem: Path, gz: bytes | None = None) -> None:
+        """O servidor tem a imagem e responde IMAGE para o instalador. Com `gz`,
+        o servidor de arquivos tem esses bytes e a resposta ganha a linha GZ."""
         shutil.copy(imagem, self.servidor / imagem.name)
-        (self.respostas / "ultima").write_text(
+        texto = (
             f"IMAGE {md5(imagem)} {imagem.stat().st_size} {imagem.name} "
             f"https://s/boot/v3/sala1/installfile/{imagem.name}\n"
         )
+        if gz is not None:
+            (self.servidor / f"{imagem.name}.gz").write_bytes(gz)
+            texto += f"GZ https://arquivos:443/mlbootimages/{imagem.name}.gz\n"
+        (self.respostas / "ultima").write_text(texto)
 
     def env(self, **env) -> dict:
         return {
@@ -552,6 +559,86 @@ def test_md5_errado_nao_toca_no_disco(maq, tmp_path):
     assert "sala1-abc" not in tela
     assert not (maq.inst / "sala1-abc.img").exists()
     assert "REBOOT" in maq.acoes_texto()
+
+
+# --- o servidor de arquivos primeiro (a linha GZ) ---
+
+GZ_URL = "aria2c https://arquivos:443/mlbootimages/sala1-abc.img.gz"
+ROTA_URL = "aria2c https://s/boot/v3/sala1/installfile/sala1-abc.img"
+
+
+def _com_gz(maq, tmp_path, gz=None):
+    """A cena do disco inteiro com o servidor de arquivos, que tem os bytes
+    `gz` (sem eles, o .gz certo da imagem)."""
+    script, disco = _cena_disco(maq, tmp_path)
+    img = tmp_path / "sala1-abc.img"
+    maq.servir(img, gz=gzip.compress(img.read_bytes()) if gz is None else gz)
+    return script, disco
+
+
+def test_baixa_o_gz_do_servidor_de_arquivos(maq, tmp_path):
+    script, disco = _com_gz(maq, tmp_path)
+    # sem a rota: se o instalador a usasse, o download falharia
+    (maq.servidor / "sala1-abc.img").unlink()
+    r = maq.roda(script, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0")
+    assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
+    assert [x["type"] for x in _particoes(disco)] == ["ef", "83"]
+    acoes = maq.acoes_texto()
+    assert GZ_URL in acoes and ROTA_URL not in acoes
+    assert not (maq.inst / "sala1-abc.img.gz").exists()
+
+
+@pytest.mark.parametrize("caso", ["gz-truncado", "outra-imagem", "nao-existe"])
+def test_gz_que_nao_serve_cai_na_rota(maq, tmp_path, caso):
+    """Nada que venha do servidor de arquivos para a instalação: o .gz da
+    produção já derrubou todas as sedes uma vez (22/10/2026)."""
+    script, disco = _cena_disco(maq, tmp_path)
+    img = tmp_path / "sala1-abc.img"
+    certo = gzip.compress(img.read_bytes())
+    gz = {"gz-truncado": certo[: len(certo) // 2],
+          "outra-imagem": gzip.compress(b"outra" * 4096),
+          "nao-existe": b""}[caso]
+    maq.servir(img, gz=gz)
+    if caso == "nao-existe":
+        (maq.servidor / "sala1-abc.img.gz").unlink()
+    r = maq.roda(script, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0")
+    assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
+    assert "the USB image from arquivos did not work" in r.stdout, r.stdout
+    acoes = maq.acoes_texto()
+    assert GZ_URL in acoes and ROTA_URL in acoes
+    assert acoes.index(GZ_URL) < acoes.index(ROTA_URL)
+    assert not (maq.inst / "sala1-abc.img.gz").exists()
+
+
+def test_md5_errado_nas_duas_pernas_mostra_a_rota(maq, tmp_path):
+    """Só a rota para a instalação, e a tela fala dela."""
+    script, disco = _com_gz(maq, tmp_path)
+    linhas = (maq.respostas / "ultima").read_text().splitlines()
+    campos = linhas[0].split()
+    campos[1] = "0" * 32
+    (maq.respostas / "ultima").write_text(" ".join(campos) + "\n" + linhas[1] + "\n")
+    r = maq.roda(script, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0")
+    assert disco.read_bytes() == b"\0" * disco.stat().st_size
+    tela = r.stdout.split("=== FAILED ===", 1)[-1]
+    assert "does not match the server (MD5)" in tela, r.stdout
+    assert " MB from s, expected " in tela, tela
+    assert GZ_URL in maq.acoes_texto() and ROTA_URL in maq.acoes_texto()
+    assert "REBOOT" in maq.acoes_texto()
+
+
+def test_sem_ram_para_o_gz_e_a_imagem_juntos_vai_pela_rota(maq, tmp_path):
+    """O .gz e a imagem ficam juntos na RAM até o gunzip acabar. Sem lugar
+    para os dois, vai pela rota, que só precisa da imagem."""
+    script, disco = _com_gz(maq, tmp_path)
+    tam = (tmp_path / "sala1-abc.img").stat().st_size
+    # cabe a imagem com a folga de 512 MB, mas não a imagem duas vezes
+    kb = tam // 1024 + 524288 + tam // 2048
+    (tmp_path / "meminfo").write_text(f"MemAvailable: {kb} kB\n")
+    r = maq.roda(script, NB_MIN_FREE_KB="1024", NB_INST_MARGEM="0",
+                 NB_INST_MEMINFO=tmp_path / "meminfo")
+    assert "=== DONE ===" in r.stdout, r.stdout + r.stderr
+    acoes = maq.acoes_texto()
+    assert ROTA_URL in acoes and GZ_URL not in acoes
 
 
 def _empate(maq, tmp_path, resposta, **env):
@@ -1251,35 +1338,45 @@ def test_sem_imagem_responde_wait_e_gera(agendados, build, genusb, client, data_
     assert estado["layout"] == usb.GRUB_LAYOUT
 
 
-def test_a_rota_nao_oferece_o_gz_do_servidor_de_arquivos(build, genusb, client, data_root, sede):
-    """O aria2c baixa um pedaço de cada URL da linha, como cópias do mesmo
+def test_o_gz_do_servidor_de_arquivos_vai_numa_linha_propria(build, genusb, client, data_root, sede):
+    """O aria2c baixa um pedaço de cada URL da linha IMAGE, como cópias do mesmo
     arquivo. No servidor de arquivos o pendrive mora compactado, e o md5 e o
-    tamanho da linha são do `.img` cru: com o `.gz` na lista, toda instalação
-    parava no md5 (produção, 18 a 22/10/2026). Toda URL da linha entrega os
-    bytes do md5 anunciado."""
+    tamanho da linha são do `.img` cru: com o `.gz` nela, toda instalação
+    parava no md5 (produção, 18 a 22/10/2026). Toda URL da linha IMAGE entrega
+    os bytes do md5 anunciado; o `.gz` vem na linha GZ, só quando a cópia de lá
+    é desta construção."""
     import asyncio
 
     estado = asyncio.run(usb.gerar_da_sala("sala1"))
     nome = estado["file"]
-    fsdb.write_json(
-        data_root / "publish" / f"{nome}.json",
-        {
-            "file": nome,
-            "kind": "usb",
-            "status": "done",
-            "url": f"https://files.exemplo/mlbootimages/{nome}.gz",
-            "published_at": (data_root / "usb" / nome).stat().st_mtime + 10,
-        },
-    )
+    gz = f"https://files.exemplo/mlbootimages/{nome}.gz"
+
+    def publica(atraso):
+        fsdb.write_json(
+            data_root / "publish" / f"{nome}.json",
+            {"file": nome, "kind": "usb", "status": "done", "url": gz,
+             "published_at": (data_root / "usb" / nome).stat().st_mtime + atraso},
+        )
+
+    def linhas():
+        r = client.get("/boot/v3/sala1/install", headers=_chave(sede))
+        return dict(l.split(" ", 1) for l in r.text.splitlines())
+
+    assert "GZ" not in linhas()
     # a situação da produção: publicada, e a cópia de lá é desta construção
-    assert usb.image_state("sala1")["public_url"].endswith(".gz")
-    r = client.get("/boot/v3/sala1/install", headers=_chave(sede))
-    _, md5_linha, tam, arq, *urls = r.text.split()
-    assert urls and not any(".gz" in u for u in urls), r.text
+    publica(10)
+    assert usb.image_state("sala1")["public_url"] == gz
+    resposta = linhas()
+    assert resposta["GZ"] == gz
+    md5_linha, tam, arq, *urls = resposta["IMAGE"].split()
+    assert urls and not any(".gz" in u for u in urls), resposta
     for u in urls:
         caminho = u.split("/boot/v3/", 1)[1]
         corpo = client.get(f"/boot/v3/{caminho}", headers=_chave(sede)).content
         assert hashlib.md5(corpo).hexdigest() == md5_linha and len(corpo) == int(tam), u
+    # a cópia de lá é de uma construção anterior: nada de GZ
+    publica(-3600)
+    assert "GZ" not in linhas()
 
 
 def test_enquanto_gera_nao_agenda_de_novo(agendados, client, data_root, sede):

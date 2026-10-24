@@ -235,6 +235,12 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
       (`publish.COMPRIMIDOS`), e com o `.gz` na lista toda instalação da
       produção parou no md5 (18 a 22/10/2026). As VMs não pegaram porque o
       servidor de teste não publica. Há teste que confere os bytes de cada URL;
+    - o `.gz` vem numa linha própria, `GZ <url>`, só quando a cópia de lá é
+      desta construção. O instalador o tenta primeiro (download, `gunzip`,
+      md5) e, com qualquer falha, apaga e baixa pela rota. Só a rota para a
+      instalação: nada do servidor de arquivos pode levar à tela FAILED. Para
+      testar em VM, aponte a marca de `dados/publish/<arquivo>.json` para um
+      nginx sem root que sirva o `.gz` (`published_at` depois do mtime);
     - duas confirmações: a escolha no menu e o YES digitado na tela que
       mostra o disco e o que vai ser feito. A pergunta vem ANTES do download
       (o técnico responde e segue para a próxima máquina) e é a segunda
@@ -301,7 +307,7 @@ o primeiro. Rota nova de console usa `require_console` + as funções de
 ```bash
 tools/nb3-init                     # instalação nova: emite e IMPRIME a chave
 tools/nb3-dev                      # servidor em 127.0.0.1:8890
-.venv/bin/python -m pytest -q      # 1430 testes, ~4 min
+.venv/bin/python -m pytest -q      # 1436 testes, ~4 min
 tools/nb3-seed-testdata            # dados de teste (não é instalação)
 tools/nb3-layer-worker --check     # confere as ferramentas rootless
 ```
