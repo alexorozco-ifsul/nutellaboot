@@ -229,6 +229,12 @@ Três partes: **servidor** (FastAPI, `server/`), **cliente de boot**
       e o YES ainda vem na tela do disco escolhido;
     - a imagem é baixada para a RAM e conferida pelo md5 ANTES de tocar no
       disco;
+    - a linha `IMAGE` só leva URL que entrega os MESMOS bytes do md5. O
+      `aria2c` trata as URLs da linha como cópias do mesmo arquivo e baixa um
+      pedaço de cada; o pendrive vai COMPACTADO ao servidor de arquivos
+      (`publish.COMPRIMIDOS`), e com o `.gz` na lista toda instalação da
+      produção parou no md5 (18 a 22/10/2026). As VMs não pegaram porque o
+      servidor de teste não publica. Há teste que confere os bytes de cada URL;
     - duas confirmações: a escolha no menu e o YES digitado na tela que
       mostra o disco e o que vai ser feito. A pergunta vem ANTES do download
       (o técnico responde e segue para a próxima máquina) e é a segunda
@@ -295,7 +301,7 @@ o primeiro. Rota nova de console usa `require_console` + as funções de
 ```bash
 tools/nb3-init                     # instalação nova: emite e IMPRIME a chave
 tools/nb3-dev                      # servidor em 127.0.0.1:8890
-.venv/bin/python -m pytest -q      # 1428 testes, ~4 min
+.venv/bin/python -m pytest -q      # 1430 testes, ~4 min
 tools/nb3-seed-testdata            # dados de teste (não é instalação)
 tools/nb3-layer-worker --check     # confere as ferramentas rootless
 ```

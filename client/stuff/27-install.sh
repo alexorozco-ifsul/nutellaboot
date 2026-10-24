@@ -153,6 +153,37 @@ nb_inst_falhou() {
         "  -> if it fails the same way, write down the reason above"
 }
 
+# O md5 não conferiu: a tela mostra o que chegou e de onde, ao lado do que o
+# servidor anunciou. Em 22/10/2026 uma sede tentou dez vezes com "check the
+# network cable" na tela, e o defeito era a lista de URLs do servidor. O nome
+# do arquivo fica de fora: o sufixo é o segredo do download, e esta tela vira
+# foto. $1 = o md5 que chegou. Não volta.
+nb_inst_falhou_md5() {
+    _ifm_tam=$(wc -c < "$NB_INST_TMP/$NB_INST_ARQ" 2> /dev/null | tr -d ' ')
+    rm -f "$NB_INST_TMP/$NB_INST_ARQ"
+    _ifm_host=$(printf '%s' "${NB_INST_URLS%% *}" | sed -e 's#^[a-z]*://##' -e 's#[/:].*##')
+    _ifm_esp=${NB_INST_MD5%"${NB_INST_MD5#????????}"}
+    _ifm_got=${1%"${1#????????}"}
+    if [ -n "${NB_INST_TOCOU:-}" ]; then
+        _ifm_l="The disk WAS changed and may not start: run the installer again."
+    else
+        _ifm_l="Nothing was changed on the disk."
+    fi
+    nb_fatal_screen "FAILED" \
+        "!The installation did not finish." \
+        "" \
+        "Reason: the USB image of this site does not match the server (MD5)." \
+        "        Got $((${_ifm_tam:-0} / 1048576)) MB from $_ifm_host, expected $((NB_INST_TAM / 1048576)) MB." \
+        "        MD5 expected $_ifm_esp, got ${_ifm_got:-nothing}." \
+        "$_ifm_l" \
+        "" \
+        "!What to do:" \
+        "  -> the normal start (first entry of the menu) still works" \
+        "  -> start the installer again one time" \
+        "  -> if the same MD5 comes again, the problem is on the server:" \
+        "     send a photo of this screen to the contest organization"
+}
+
 # A imagem gravada vai inteira para a RAM: no modo `disco` não há outro lugar,
 # porque o disco é o que vai ser apagado.
 nb_inst_ram() {
@@ -215,8 +246,13 @@ nb_inst_baixa() {
         nb_inst_falhou "the installer files could not be downloaded"
     NB_DL_PROGRESS=0
     NB_DL_LABEL=
-    nutella_md5sum "$NB_INST_MD5" "$NB_INST_TMP/$NB_INST_ARQ" ||
-        nb_inst_falhou "the downloaded file is damaged (MD5 does not match)"
+    log_begin_msg "Checking MD5 of the USB image of this site"
+    _iba_md5=$(md5sum "$NB_INST_TMP/$NB_INST_ARQ" | awk '{print $1}')
+    if [ "$_iba_md5" != "$NB_INST_MD5" ]; then
+        log_failure_msg "MD5 mismatch: expected $NB_INST_MD5, got $_iba_md5"
+        nb_inst_falhou_md5 "$_iba_md5"
+    fi
+    log_end_msg
     NB_INST_IMG=$NB_INST_TMP/$NB_INST_ARQ
 }
 

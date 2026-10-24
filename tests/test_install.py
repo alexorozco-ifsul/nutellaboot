@@ -541,8 +541,17 @@ def test_md5_errado_nao_toca_no_disco(maq, tmp_path):
         NB_MIN_FREE_KB="1024",
         NB_INST_MARGEM="0",
     )
-    assert "MD5 does not match" in r.stdout, r.stdout
     assert disco.read_bytes() == b"\0" * disco.stat().st_size
+    tela = r.stdout.split("=== FAILED ===", 1)[-1]
+    mb = img.stat().st_size // 1048576
+    assert "does not match the server (MD5)" in tela, r.stdout
+    assert f"Got {mb} MB from s, expected {mb} MB." in tela, tela
+    assert f"MD5 expected 00000000, got {md5(img)[:8]}." in tela, tela
+    assert "Nothing was changed on the disk" in tela
+    # a tela vira foto: o nome, com o sufixo que é o segredo do download, fica fora
+    assert "sala1-abc" not in tela
+    assert not (maq.inst / "sala1-abc.img").exists()
+    assert "REBOOT" in maq.acoes_texto()
 
 
 def _empate(maq, tmp_path, resposta, **env):
@@ -1173,6 +1182,25 @@ def test_a_recusa_de_disco_cabe_na_tela(maq):
     assert "REBOOT" in maq.acoes_texto()
 
 
+
+def test_a_tela_do_md5_cabe_na_tela(maq):
+    """O pior caso: o host longo da produção, com porta, na linha do tamanho."""
+    maq.inst.mkdir()
+    (maq.inst / "sala1-abc.img").write_bytes(b"x" * 1024)
+    r = maq.roda(
+        "NB_INST_ARQ=sala1-abc.img; NB_INST_TAM=419430400; NB_INST_MD5=" + "0" * 32 + "; "
+        "NB_INST_URLS='https://nutellaboot.mdp.naquadah.com.br:443/boot/v3/sala1/installfile/x.img https://b/'; "
+        "nb_inst_falhou_md5 " + "f" * 32,
+        NB_UI_PLAIN="0",
+    )
+    linhas = _sem_cor(r.stdout)
+    assert len(linhas) <= MAX_LINHAS, r.stdout
+    assert max(len(l) for l in linhas) <= 80, max(linhas, key=len)
+    assert "Got 0 MB from nutellaboot.mdp.naquadah.com.br, expected 400 MB." in r.stdout, r.stdout
+    assert "MD5 expected 00000000, got ffffffff." in r.stdout
+    assert "REBOOT" in maq.acoes_texto()
+
+
 # --- o servidor: /boot/v3/<sede>/install ---
 
 
@@ -1221,6 +1249,37 @@ def test_sem_imagem_responde_wait_e_gera(agendados, build, genusb, client, data_
     assert partes[2] == "17" and partes[3] == estado["file"]
     assert partes[-1].endswith(f"/boot/v3/sala1/installfile/{estado['file']}")
     assert estado["layout"] == usb.GRUB_LAYOUT
+
+
+def test_a_rota_nao_oferece_o_gz_do_servidor_de_arquivos(build, genusb, client, data_root, sede):
+    """O aria2c baixa um pedaço de cada URL da linha, como cópias do mesmo
+    arquivo. No servidor de arquivos o pendrive mora compactado, e o md5 e o
+    tamanho da linha são do `.img` cru: com o `.gz` na lista, toda instalação
+    parava no md5 (produção, 18 a 22/10/2026). Toda URL da linha entrega os
+    bytes do md5 anunciado."""
+    import asyncio
+
+    estado = asyncio.run(usb.gerar_da_sala("sala1"))
+    nome = estado["file"]
+    fsdb.write_json(
+        data_root / "publish" / f"{nome}.json",
+        {
+            "file": nome,
+            "kind": "usb",
+            "status": "done",
+            "url": f"https://files.exemplo/mlbootimages/{nome}.gz",
+            "published_at": (data_root / "usb" / nome).stat().st_mtime + 10,
+        },
+    )
+    # a situação da produção: publicada, e a cópia de lá é desta construção
+    assert usb.image_state("sala1")["public_url"].endswith(".gz")
+    r = client.get("/boot/v3/sala1/install", headers=_chave(sede))
+    _, md5_linha, tam, arq, *urls = r.text.split()
+    assert urls and not any(".gz" in u for u in urls), r.text
+    for u in urls:
+        caminho = u.split("/boot/v3/", 1)[1]
+        corpo = client.get(f"/boot/v3/{caminho}", headers=_chave(sede)).content
+        assert hashlib.md5(corpo).hexdigest() == md5_linha and len(corpo) == int(tam), u
 
 
 def test_enquanto_gera_nao_agenda_de_novo(agendados, client, data_root, sede):
