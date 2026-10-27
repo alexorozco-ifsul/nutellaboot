@@ -682,10 +682,11 @@ async def gerar_instalador(image_id: str) -> dict:
 def install_text(image_id: str) -> str:
     """A resposta de `/boot/v3/<sede>/install`, em texto puro (invariante 3).
 
-    `IMAGE <md5> <bytes> <arquivo> <url> [<url>...]`: a imagem do pendrive da
-    sala, que o instalador confere e grava no começo do disco (ou de onde tira
-    o GRUB e o par, no modo ao lado do Windows). A URL do servidor de arquivos
-    vem primeiro quando a cópia de lá é desta construção.
+    `IMAGE <md5> <bytes> <arquivo> <url>`: a imagem do pendrive da sala, que o
+    instalador confere e grava no começo do disco (ou de onde tira o GRUB e o
+    par, no modo ao lado do Windows). A URL é a desta máquina. Quando a cópia
+    do servidor de arquivos é desta construção, vem depois `GZ <url>`: ela,
+    compactada, que o instalador tenta primeiro (ver o comentário no fim).
 
     `WAIT <motivo>` quando ela não serve ainda (não existe, desatualizada, ou
     gerada antes do instalador): a geração começa aqui, e o instalador pergunta
@@ -712,12 +713,19 @@ def install_text(image_id: str) -> str:
         if status != "building":
             agendar(image_id, forcado=True)
         return f"WAIT {motivo}\n"
-    urls = []
+    # O aria2c trata as URLs da linha IMAGE como cópias do MESMO arquivo e
+    # baixa um pedaço de cada, e o md5 e o tamanho dela são do `.img` cru. No
+    # servidor de arquivos o pendrive mora compactado (`publish.COMPRIMIDOS`):
+    # com o `.gz` na lista, toda instalação parou no md5 (produção, 18 a
+    # 22/10/2026). Ele vai na linha GZ, que o instalador baixa sozinha e
+    # descompacta; qualquer falha ali cai na rota daqui. URL que entrar na
+    # linha IMAGE serve os mesmos bytes.
+    url = f"{settings.base_url}/boot/v3/{image_id}/installfile/{estado['file']}"
+    texto = f"IMAGE {estado['md5']} {estado.get('size', 0)} {estado['file']} {url}\n"
     publicada = url_publicada_atual(estado)
-    if publicada:
-        urls.append(publicada)
-    urls.append(f"{settings.base_url}/boot/v3/{image_id}/installfile/{estado['file']}")
-    return f"IMAGE {estado['md5']} {estado.get('size', 0)} {estado['file']} {' '.join(urls)}\n"
+    if publicada and "usb" in publish.COMPRIMIDOS:
+        texto += f"GZ {publicada}\n"
+    return texto
 
 
 # --- agendamento ---

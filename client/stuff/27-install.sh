@@ -153,13 +153,53 @@ nb_inst_falhou() {
         "  -> if it fails the same way, write down the reason above"
 }
 
+# O md5 não conferiu: a tela mostra o que chegou e de onde, ao lado do que o
+# servidor anunciou. Em 22/10/2026 uma sede tentou dez vezes com "check the
+# network cable" na tela, e o defeito era a lista de URLs do servidor. O nome
+# do arquivo fica de fora: o sufixo é o segredo do download, e esta tela vira
+# foto. $1 = o md5 que chegou. Não volta.
+nb_inst_falhou_md5() {
+    _ifm_tam=$(wc -c < "$NB_INST_TMP/$NB_INST_ARQ" 2> /dev/null | tr -d ' ')
+    rm -f "$NB_INST_TMP/$NB_INST_ARQ"
+    _ifm_host=$(nb_inst_host "${NB_INST_URLS%% *}")
+    _ifm_esp=${NB_INST_MD5%"${NB_INST_MD5#????????}"}
+    _ifm_got=${1%"${1#????????}"}
+    if [ -n "${NB_INST_TOCOU:-}" ]; then
+        _ifm_l="The disk WAS changed and may not start: run the installer again."
+    else
+        _ifm_l="Nothing was changed on the disk."
+    fi
+    nb_fatal_screen "FAILED" \
+        "!The installation did not finish." \
+        "" \
+        "Reason: the USB image of this site does not match the server (MD5)." \
+        "        Got $((${_ifm_tam:-0} / 1048576)) MB from $_ifm_host, expected $((NB_INST_TAM / 1048576)) MB." \
+        "        MD5 expected $_ifm_esp, got ${_ifm_got:-nothing}." \
+        "$_ifm_l" \
+        "" \
+        "!What to do:" \
+        "  -> the normal start (first entry of the menu) still works" \
+        "  -> start the installer again one time" \
+        "  -> if the same MD5 comes again, the problem is on the server:" \
+        "     send a photo of this screen to the contest organization"
+}
+
+# O nome da máquina de uma URL, para a tela: sem esquema, porta nem caminho.
+nb_inst_host() {
+    printf '%s' "$1" | sed -e 's#^[a-z]*://##' -e 's#[/:].*##'
+}
+
+# $1 bytes cabem na RAM, com 512 MB de folga? Sem o meminfo, supõe que sim.
+nb_inst_cabe() {
+    _ica_kb=$(awk '/^MemAvailable:/ {print $2}' "$NB_INST_MEMINFO" 2> /dev/null)
+    [ -z "$_ica_kb" ] || [ "$_ica_kb" -gt $(($1 / 1024 + 524288)) ]
+}
+
 # A imagem gravada vai inteira para a RAM: no modo `disco` não há outro lugar,
 # porque o disco é o que vai ser apagado.
 nb_inst_ram() {
-    _ira_kb=$(awk '/^MemAvailable:/ {print $2}' "$NB_INST_MEMINFO" 2> /dev/null)
-    [ -n "$_ira_kb" ] || return 0
-    [ "$_ira_kb" -gt $(($1 / 1024 + 524288)) ] && return 0
-    nb_inst_falhou "not enough free memory for the $(($1 / 1048576)) MB installer file"
+    nb_inst_cabe "$1" ||
+        nb_inst_falhou "not enough free memory for the $(($1 / 1048576)) MB installer file"
 }
 
 # A imagem do pendrive da sede, pela rota do instalador. Ela pode não estar
@@ -199,25 +239,82 @@ nb_inst_consulta() {
     NB_INST_ARQ=$3
     shift 3
     NB_INST_URLS=$*
+    # GZ <url>: a mesma imagem, compactada, no servidor de arquivos. Opcional:
+    # o servidor só a manda quando a cópia de lá é desta construção.
+    NB_INST_GZ=$(printf '%s\n' "$_ics_r" | sed -n 's/^GZ //p' | sed -n 1p)
+    case "$NB_INST_GZ" in http://* | https://*) ;; *) NB_INST_GZ= ;; esac
     case "$NB_INST_ARQ" in "" | .* | */*) nb_inst_falhou "the server sent a bad file name" ;; esac
     # o tamanho entra em conta antes do download: texto aqui seria erro de shell
     case "$NB_INST_TAM" in "" | *[!0-9]*) nb_inst_falhou "the server sent a bad file size" ;; esac
     nb_inst_ram "$NB_INST_TAM"
 }
 
-# Só depois do YES: a imagem vai para a RAM e é conferida pelo md5.
+# Só depois do YES: a imagem vai para a RAM e é conferida pelo md5. Primeiro
+# do servidor de arquivos, depois pela rota desta máquina.
 nb_inst_baixa() {
     mkdir -p "$NB_INST_TMP"
     NB_DL_PROGRESS=1
+    nb_inst_baixa_gz || nb_inst_baixa_rota
+    NB_DL_PROGRESS=0
+    NB_DL_LABEL=
+    NB_INST_IMG=$NB_INST_TMP/$NB_INST_ARQ
+}
+
+# A cópia compactada do servidor de arquivos (linha GZ): poupa à máquina de
+# gestão os 400 MB de cada instalação. Volta 0 só com a imagem descompactada no
+# lugar e o md5 conferido. Qualquer outra falha (download, gunzip, md5) apaga o
+# que baixou e volta 1, e a imagem vem pela rota. Esta perna nunca para a
+# instalação: um .gz ruim lá não derruba mais nenhuma sede (22/10/2026).
+nb_inst_baixa_gz() {
+    [ -n "${NB_INST_GZ:-}" ] || return 1
+    command -v gunzip > /dev/null 2>&1 || return 1
+    # o .gz e a imagem ficam na RAM ao mesmo tempo, até o gunzip acabar
+    nb_inst_cabe $((NB_INST_TAM * 2)) || return 1
+    _ibg_gz=$NB_INST_TMP/$NB_INST_ARQ.gz
+    _ibg_img=$NB_INST_TMP/$NB_INST_ARQ
+    _ibg_host=$(nb_inst_host "$NB_INST_GZ")
+    _ibg_md5=
+    # duas tentativas, não cinco: com o servidor de arquivos fora do ar, a
+    # rota começa em menos de um minuto
+    _ibg_tries=${NB_DOWNLOAD_TRIES:-}
+    NB_DOWNLOAD_TRIES=2
+    NB_DL_LABEL="installer: $NB_INST_ARQ.gz"
+    if nb_download "$_ibg_gz" 4 "$NB_INST_GZ"; then
+        log_begin_msg "Unpacking the USB image of this site"
+        if gunzip -c "$_ibg_gz" > "$_ibg_img"; then
+            log_end_msg
+            log_begin_msg "Checking MD5 of the USB image of this site"
+            _ibg_md5=$(md5sum "$_ibg_img" | awk '{print $1}')
+        else
+            log_failure_msg "the file from $_ibg_host is not a good gzip file"
+        fi
+    fi
+    NB_DOWNLOAD_TRIES=$_ibg_tries
+    rm -f "$_ibg_gz"
+    if [ -n "$_ibg_md5" ] && [ "$_ibg_md5" = "$NB_INST_MD5" ]; then
+        log_end_msg
+        return 0
+    fi
+    [ -n "$_ibg_md5" ] &&
+        log_failure_msg "MD5 mismatch from $_ibg_host: expected $NB_INST_MD5, got $_ibg_md5"
+    rm -f "$_ibg_img"
+    nb_warn "the USB image from $_ibg_host did not work - downloading it from the boot server"
+    return 1
+}
+
+# A rota desta máquina (linha IMAGE): a palavra final. Falhou aqui, para.
+nb_inst_baixa_rota() {
     NB_DL_LABEL="installer: $NB_INST_ARQ"
     # shellcheck disable=SC2086
     nb_download "$NB_INST_TMP/$NB_INST_ARQ" 4 $NB_INST_URLS ||
         nb_inst_falhou "the installer files could not be downloaded"
-    NB_DL_PROGRESS=0
-    NB_DL_LABEL=
-    nutella_md5sum "$NB_INST_MD5" "$NB_INST_TMP/$NB_INST_ARQ" ||
-        nb_inst_falhou "the downloaded file is damaged (MD5 does not match)"
-    NB_INST_IMG=$NB_INST_TMP/$NB_INST_ARQ
+    log_begin_msg "Checking MD5 of the USB image of this site"
+    _ibr_md5=$(md5sum "$NB_INST_TMP/$NB_INST_ARQ" | awk '{print $1}')
+    if [ "$_ibr_md5" != "$NB_INST_MD5" ]; then
+        log_failure_msg "MD5 mismatch: expected $NB_INST_MD5, got $_ibr_md5"
+        nb_inst_falhou_md5 "$_ibr_md5"
+    fi
+    log_end_msg
 }
 
 # O início da p1 da imagem, em setores (o nb3-genusb a põe em 1 MiB).

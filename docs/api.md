@@ -113,7 +113,7 @@ mandar a chave no corpo; `aria2c` e `curl` usam o cabeçalho.
 | GET/POST | `/boot/v3/{img}/roster/logos/{org}` | B | tela de bloqueio | SVG ou PNG do logotipo |
 | GET/POST | `/boot/v3/{img}/usb` | B | `stuff` | `BUILD <id>` e, nas linhas seguintes, `MD5 ARQUIVO URL` (mesmo formato do manifest) |
 | GET/POST | `/boot/v3/{img}/usbfile/{nome}` | B | `stuff` | o `vmlinuz` ou o `initrd.img` do par desta sede |
-| GET/POST | `/boot/v3/{img}/install` | B | `stuff` (instalador) | `IMAGE <md5> <bytes> <arquivo> <url>…` (a imagem do pendrive da sede), `WAIT <motivo>` enquanto ela é gerada, ou `FAIL <motivo>` |
+| GET/POST | `/boot/v3/{img}/install` | B | `stuff` (instalador) | `IMAGE <md5> <bytes> <arquivo> <url>` (a imagem do pendrive da sede, pela rota `installfile` desta máquina) e, quando a cópia do servidor de arquivos é desta construção, `GZ <url>` (ela, compactada, que o instalador tenta primeiro); `WAIT <motivo>` enquanto ela é gerada, ou `FAIL <motivo>` |
 | GET/POST | `/boot/v3/{img}/installfile/{arquivo}` | B | `stuff` (instalador) | a imagem do pendrive desta sede; só o arquivo atual dela, o resto é 404 |
 
 O join respeita o limite `SEEDMAX` da configuração da imagem (padrão 4):

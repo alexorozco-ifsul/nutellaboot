@@ -268,7 +268,15 @@ A lógica está em `client/stuff/27-install.sh`, que roda dentro do
 nada. Os dados vêm do **servidor**, e não do pendrive:
 `/boot/v3/<sede>/install` aponta a imagem do pendrive da sede, a mesma do
 console, com o par do modelo. A imagem é baixada para a RAM e conferida pelo
-md5 antes de qualquer gravação. Por isso o pendrive pode sair na faixa de
+md5 antes de qualquer gravação. Ela vem primeiro do servidor de arquivos, onde
+o pendrive mora compactado (`.img.gz`, na linha `GZ`): o instalador a baixa, a
+descompacta e confere o md5. Qualquer falha ali apaga o que veio e baixa pela
+rota `installfile` do próprio servidor (linha `IMAGE`), e só essa pode parar a
+instalação. O `.gz` não pode ir na linha `IMAGE`: o `aria2c` trata as URLs de
+uma linha como cópias do mesmo arquivo e baixa um pedaço de cada, e com o
+`.gz` nela toda instalação parou no md5 (18 a 22/10/2026). Se o md5 da rota
+não confere, a tela mostra o tamanho e o md5 que chegaram, de qual servidor, ao
+lado dos esperados. Por isso o pendrive pode sair na faixa de
 sempre, e uma sede com iPXE instala com uma entrada a mais no menu dela, sem
 pendrive nenhum. Imagem que ainda não existe, que está desatualizada ou que é
 de antes do instalador é gerada ali mesmo: a rota responde `WAIT` até ela
