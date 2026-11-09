@@ -11,6 +11,7 @@ autenticação nenhuma, que interpolava parâmetros do usuário direto em `rm` e
 
 from __future__ import annotations
 
+import base64
 import time
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -304,6 +305,50 @@ async def list_bindings(
 # --- consumido pela tela de bloqueio (sem autenticação, como o resto do boot) ---
 
 
+# Teto do logotipo embutido: o lockinfo inteiro vai na query string do tema.
+LOGO_EMBUTIDO_MAX = 512 * 1024
+
+# O cartão do logotipo: tamanho fixo e fundo branco. O fundo das telas é
+# escuro, e muito logo é escuro sobre transparente: o da USP São Carlos, preto
+# puro, sumia na final de 2026. Dos 58 logos da final, nenhum era claro sobre
+# transparente, o único caso que o branco apagaria. O tamanho fixo põe todos
+# na mesma moldura, do selo alto ao nome largo. Por fora o cartão também vai
+# em base64: o lock.js decodifica a query duas vezes (URLSearchParams e
+# decodeURIComponent), e um %22 viraria aspas dentro do src do <img>.
+CARTAO = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320" viewBox="0 0 480 320">'
+    '<rect width="480" height="320" rx="28" fill="#fff"/>'
+    '<image x="36" y="32" width="408" height="256" preserveAspectRatio="xMidYMid meet" href="{}"/>'
+    "</svg>"
+)
+
+
+def _data_uri(media: str, conteudo: bytes) -> str:
+    return f"data:{media};base64," + base64.b64encode(conteudo).decode()
+
+
+def _logo_url(image: str, org_id: str) -> str:
+    """O logotipo EMBUTIDO, como data: URI, dentro do `CARTAO`.
+
+    O tema da tela é aberto de file://: um caminho "/boot/v3/..." vira
+    file:///boot/v3/... e o <img> nem chega ao servidor; e, se chegasse, a rota
+    do logotipo pede a chave de boot, que um <img> não manda. Embutido, o logo
+    chega com o lockinfo (que já vem autenticado), vai para o cache da tela
+    junto com ele e aparece sem rede. A tela em campo não muda: ela já põe o
+    logo_url no <img>."""
+    if not org_id or "/" in org_id or ".." in org_id:
+        return ""
+    d = store.site_image_dir(image) / "roster" / "logos"
+    for ext, media in (("svg", "image/svg+xml"), ("png", "image/png")):
+        f = d / f"{org_id}.{ext}"
+        if f.is_file():
+            if f.stat().st_size > LOGO_EMBUTIDO_MAX:
+                return f"/boot/v3/{image}/roster/logos/{org_id}"
+            logo = _data_uri(media, f.read_bytes())
+            return _data_uri("image/svg+xml", CARTAO.format(logo).encode())
+    return ""
+
+
 def lockinfo(image: str, mac: str) -> dict:
     info = store.get_site_image(image) or {}
     binding = fsdb.read_json(m.machine_dir(image, mac) / "binding.json") or {}
@@ -314,11 +359,7 @@ def lockinfo(image: str, mac: str) -> dict:
         )
     org = entry.get("organization") or {}
     org_id = str(org.get("id", ""))
-    logo_url = ""
-    if org_id:
-        d = store.site_image_dir(image) / "roster" / "logos"
-        if any(d.glob(f"{org_id}.*")) if d.is_dir() else False:
-            logo_url = f"/boot/v3/{image}/roster/logos/{org_id}"
+    logo_url = _logo_url(image, org_id)
     return {
         "site": info.get("fullname", image),
         "image": image,

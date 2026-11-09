@@ -167,11 +167,18 @@ O cliente lê com `while read MD5 ARQUIVO URLS` e passa `$URLS` inteiro ao
   "organization": {
     "id": "unb",
     "name": "Universidade de Brasília",
-    "logo_url": "/boot/v3/25brbr/roster/logos/unb"
+    "logo_url": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0i..."
   },
   "country": "BR"
 }
 ```
+
+O `logo_url` vem embutido (`data:`): o tema da tela abre de `file://`, onde
+um caminho `/boot/v3/...` vira arquivo local, e a rota do logotipo pede a
+chave de boot, que um `<img>` não manda. O logotipo vem dentro de um cartão
+SVG branco de 480×320 (`roster.CARTAO`), para que os logos escuros apareçam no
+fundo escuro da tela e todos fiquem do mesmo tamanho. Logotipo acima de 512 KB
+volta como caminho (e não aparece na tela).
 
 ### Exemplo: cabeçalho do `stuff`
 
